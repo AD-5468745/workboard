@@ -1,0 +1,891 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WorkBoard — 업무 현황판</title>
+
+<!-- Firebase -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged }
+    from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+  import { getFirestore, doc, setDoc, getDoc, collection, query, where,
+    getDocs, onSnapshot, orderBy, Timestamp, deleteDoc }
+    from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+  // ──────────────────────────────────────────
+  // 🔧 여기에 Firebase 프로젝트 설정을 붙여넣으세요
+  // ──────────────────────────────────────────
+  const firebaseConfig = {
+    apiKey:            "AIzaSyDi23uzT0iokcCqU8rURUwSRPikaFALaR4",
+    authDomain:        "dailywork-6ceda.firebaseapp.com",
+    projectId:         "dailywork-6ceda",
+    storageBucket:     "dailywork-6ceda.firebasestorage.app",
+    messagingSenderId: "542297301092",
+    appId:             "1:542297301092:web:a266a4891a09159087ff71"
+  };
+
+  const app  = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db   = getFirestore(app);
+
+  // ──────────────────────────────────────────
+  // 🔧 텔레그램 알림 — Cloudflare Worker 주소만 넣으세요
+  //    (봇 토큰/Chat ID는 Worker에만 보관 → 브라우저엔 비밀이 없음)
+  // ──────────────────────────────────────────
+  const TG_WORKER_URL = "https://workboard-telegram.내계정.workers.dev"; // ← 배포한 Worker 주소로 교체
+
+  // ──────────────────────────────────────────
+  // 상수
+  // ──────────────────────────────────────────
+  const HOURS = ["09:00","10:00","11:00","12:00","13:00","14:00","15:00","16:00","17:00","18:00"];
+  const DAYS  = ["월","화","수","목","금"];
+  const STATUS_LABEL = { done:"✅ 완료", wip:"⏳ 진행중", todo:"📋 예정", skip:"⛔ 불가" };
+  const STATUS_COLOR = { done:"#22c55e", wip:"#f59e0b", todo:"#6b7280", skip:"#ef4444" };
+  const BOSS_UID_KEY = "boss_uid"; // Firestore users/{uid}.role === 'boss'
+
+  // ──────────────────────────────────────────
+  // 상태
+  // ──────────────────────────────────────────
+  let currentUser = null;
+  let userRole    = null; // 'boss' | 'staff'
+  let userProfile = null;
+  let selectedStaffUid = null;
+  let unsubListeners   = [];
+
+  // ──────────────────────────────────────────
+  // 유틸
+  // ──────────────────────────────────────────
+  const today = () => new Date().toISOString().slice(0,10);
+  const weekStart = (d=new Date()) => {
+    const day = d.getDay() || 7;
+    const mon = new Date(d); mon.setDate(d.getDate()-(day-1));
+    return mon.toISOString().slice(0,10);
+  };
+  const $ = id => document.getElementById(id);
+  const el = (tag,cls,html='') => { const e=document.createElement(tag); if(cls)e.className=cls; if(html)e.innerHTML=html; return e; };
+
+  // 3개월 전 날짜 (자동 삭제 기준)
+  const cutoffDate = () => {
+    const d = new Date(); d.setMonth(d.getMonth()-3);
+    return d.toISOString().slice(0,10);
+  };
+
+  // ──────────────────────────────────────────
+  // 텔레그램 알림
+  // ──────────────────────────────────────────
+  async function sendTelegram(name, date, summary) {
+    // 토큰은 브라우저에 없음 — Cloudflare Worker가 대신 텔레그램으로 보냄.
+    const text = `📋 WorkBoard 업무 보고\n👤 ${name} — ${date}\n${summary}\n\n🔗 확인: ${location.href}`;
+    if(!TG_WORKER_URL || TG_WORKER_URL.includes("내계정")) return; // 주소 미설정 시 조용히 skip
+    try {
+      await fetch(TG_WORKER_URL, {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ text })
+      });
+    } catch(e){ console.warn("텔레그램 전송 실패",e); }
+  }
+
+  // ──────────────────────────────────────────
+  // AUTH
+  // ──────────────────────────────────────────
+  onAuthStateChanged(auth, async user => {
+    if (user) {
+      currentUser = user;
+      const snap = await getDoc(doc(db,"users",user.uid));
+      userProfile = snap.data() || {};
+      userRole = userProfile.role || 'staff';
+      showApp();
+    } else {
+      currentUser = null;
+      showLogin();
+    }
+  });
+
+  window.doLogin = async () => {
+    const id  = $('login-id').value.trim();
+    const pw  = $('login-pw').value;
+    const err = $('login-err');
+    err.textContent = '';
+    if(!id||!pw){ err.textContent='아이디와 비밀번호를 입력하세요.'; return; }
+    try {
+      // 아이디 → 이메일 규칙: setup.js와 동일하게 "아이디@workboard.internal"
+      // (로그인 전에는 보안규칙상 Firestore를 못 읽으므로, 이메일을 직접 만든다)
+      const email = `${id}@workboard.internal`;
+      await signInWithEmailAndPassword(auth, email, pw);
+    } catch(e){
+      const code = (e && e.code) || '';
+      if(code.includes('invalid-credential') || code.includes('user-not-found') || code.includes('wrong-password')){
+        err.textContent = '아이디 또는 비밀번호가 올바르지 않습니다.';
+      } else if(code.includes('too-many-requests')){
+        err.textContent = '요청이 많습니다. 잠시 후 다시 시도하세요.';
+      } else {
+        err.textContent = '로그인 실패: ' + (e.message || code);
+      }
+    }
+  };
+
+  window.doLogout = async () => { await signOut(auth); };
+
+  // ──────────────────────────────────────────
+  // 화면 전환
+  // ──────────────────────────────────────────
+  function showLogin() {
+    $('login-screen').style.display = 'flex';
+    $('app-screen').style.display   = 'none';
+  }
+  function showApp() {
+    $('login-screen').style.display = 'none';
+    $('app-screen').style.display   = 'flex';
+    $('user-name-badge').textContent = userProfile.displayName || currentUser.email;
+    $('role-badge').textContent = userRole === 'boss' ? '👑 관리자' : '👤 직원';
+    $('role-badge').className = 'role-badge ' + (userRole==='boss'?'boss':'');
+    if(userRole === 'boss') renderBossView();
+    else renderStaffView(currentUser.uid);
+  }
+
+  // ──────────────────────────────────────────
+  // ── 직원 뷰
+  // ──────────────────────────────────────────
+  function renderStaffView(uid) {
+    $('main-content').innerHTML = '';
+    const wrap = el('div','staff-wrap');
+    wrap.innerHTML = `
+      <div class="page-header">
+        <div>
+          <div class="page-title">내 업무 현황</div>
+          <div class="page-sub">${today()} · 수시 저장됩니다</div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-outline" onclick="switchTab('week')">📅 주간 계획</button>
+          <button class="btn btn-primary" onclick="switchTab('today')">📋 오늘 상세</button>
+        </div>
+      </div>
+      <div id="tab-week" class="tab-panel"></div>
+      <div id="tab-today" class="tab-panel" style="display:none"></div>
+    `;
+    $('main-content').appendChild(wrap);
+    renderWeekTimetable(uid, 'tab-week');
+    renderTodayDetail(uid, 'tab-today');
+  }
+
+  window.switchTab = (tab) => {
+    $('tab-week').style.display  = tab==='week'  ? '' : 'none';
+    $('tab-today').style.display = tab==='today' ? '' : 'none';
+  };
+
+  // ── 주간 타임테이블 (직원)
+  async function renderWeekTimetable(uid, containerId) {
+    const ws   = weekStart();
+    const wrap = $(containerId);
+    wrap.innerHTML = '<div class="section-title">📅 이번 주 타임테이블</div>';
+
+    const grid = el('div','week-grid');
+    // 헤더
+    const hdr = el('div','week-header-row');
+    hdr.innerHTML = '<div class="time-col-hdr"></div>' +
+      DAYS.map((d,i)=>{
+        const date = new Date(ws); date.setDate(date.getDate()+i);
+        const dateStr = date.toISOString().slice(0,10);
+        const isToday = dateStr === today();
+        return `<div class="day-hdr${isToday?' today':''}">${d}<br><span class="day-date">${date.getMonth()+1}/${date.getDate()}</span></div>`;
+      }).join('');
+    grid.appendChild(hdr);
+
+    // 시간 행
+    for(const hour of HOURS) {
+      const row = el('div','week-row');
+      row.innerHTML = `<div class="time-col">${hour}</div>`;
+      for(let i=0;i<5;i++){
+        const date = new Date(ws); date.setDate(date.getDate()+i);
+        const dateStr = date.toISOString().slice(0,10);
+        const isToday = dateStr === today();
+        const cell = el('div','week-cell'+(isToday?' today-col':''));
+        cell.dataset.date = dateStr;
+        cell.dataset.hour = hour;
+        cell.dataset.uid  = uid;
+        cell.addEventListener('click', () => openSlotModal(uid, dateStr, hour, cell));
+        row.appendChild(cell);
+      }
+      grid.appendChild(row);
+    }
+    wrap.appendChild(grid);
+
+    // 데이터 로드
+    const q = query(
+      collection(db,"slots"),
+      where("uid","==",uid),
+      where("weekStart","==",ws)
+    );
+    const snap = await getDocs(q);
+    snap.forEach(d => {
+      const s = d.data();
+      const cell = wrap.querySelector(`[data-date="${s.date}"][data-hour="${s.hour}"]`);
+      if(cell) renderCellContent(cell, s);
+    });
+
+    // 실시간 구독
+    const unsub = onSnapshot(q, snap => {
+      snap.docChanges().forEach(ch => {
+        const s = ch.doc.data();
+        const cell = wrap.querySelector(`[data-date="${s.date}"][data-hour="${s.hour}"]`);
+        if(cell) renderCellContent(cell, ch.type==='removed'?null:s);
+      });
+    });
+    unsubListeners.push(unsub);
+  }
+
+  function renderCellContent(cell, s) {
+    cell.innerHTML = '';
+    if(!s||!s.title) { cell.classList.remove('has-data'); return; }
+    cell.classList.add('has-data');
+    const chip = el('div','slot-chip');
+    chip.style.borderLeftColor = STATUS_COLOR[s.status]||'#6b7280';
+    chip.innerHTML = `<div class="slot-title">${s.title}</div><div class="slot-status" style="color:${STATUS_COLOR[s.status]}">${STATUS_LABEL[s.status]||''}</div>`;
+    cell.appendChild(chip);
+  }
+
+  // ── 슬롯 모달
+  function openSlotModal(uid, date, hour, cellEl) {
+    const isOwner = currentUser.uid === uid;
+    const isBoss  = userRole === 'boss';
+    if(!isOwner && !isBoss) return;
+
+    const existing = {}; // 기존 데이터 로드
+    const slotId = `${uid}_${date}_${hour.replace(':','')}`;
+    getDoc(doc(db,"slots",slotId)).then(snap => {
+      const d = snap.exists() ? snap.data() : {};
+      showModal(`
+        <div class="modal-title">📌 슬롯 편집 — ${date} ${hour}</div>
+        <div class="form-group">
+          <label>업무 내용</label>
+          <input id="s-title" class="form-input" placeholder="업무 내용을 입력하세요" value="${d.title||''}">
+        </div>
+        <div class="form-group">
+          <label>상태</label>
+          <div class="status-btns">
+            ${Object.entries(STATUS_LABEL).map(([k,v])=>`<button class="status-btn ${d.status===k?'active':''}" data-s="${k}" style="--sc:${STATUS_COLOR[k]}">${v}</button>`).join('')}
+          </div>
+        </div>
+        <div class="form-group">
+          <label>메모 (선택)</label>
+          <textarea id="s-memo" class="form-textarea" placeholder="상세 내용, 이슈 등">${d.memo||''}</textarea>
+        </div>
+        ${isBoss&&!isOwner?`<div class="form-group"><label>관리자 코멘트</label><textarea id="s-comment" class="form-textarea" placeholder="직원에게 보낼 코멘트">${d.bossComment||''}</textarea></div>`:''}
+        <div class="modal-footer">
+          ${d.title?`<button class="btn btn-danger" id="slot-del">삭제</button>`:''}
+          <button class="btn btn-outline" onclick="closeModal()">취소</button>
+          <button class="btn btn-primary" id="slot-save">저장</button>
+        </div>
+      `);
+
+      // 상태 버튼 토글
+      let selStatus = d.status||'todo';
+      document.querySelectorAll('.status-btn').forEach(b=>{
+        b.addEventListener('click',()=>{
+          selStatus=b.dataset.s;
+          document.querySelectorAll('.status-btn').forEach(x=>x.classList.remove('active'));
+          b.classList.add('active');
+        });
+      });
+
+      $('slot-save').onclick = async () => {
+        const title = $('s-title').value.trim();
+        if(!title){ alert('업무 내용을 입력하세요'); return; }
+        const payload = {
+          uid, date, hour, title,
+          status: selStatus,
+          memo: $('s-memo').value.trim(),
+          weekStart: weekStart(new Date(date)),
+          updatedAt: Timestamp.now()
+        };
+        if($('s-comment')) payload.bossComment = $('s-comment').value.trim();
+        await setDoc(doc(db,"slots",slotId), payload, {merge:true});
+
+        // 텔레그램 (직원 본인 저장 시)
+        if(isOwner) {
+          const name = userProfile.displayName||currentUser.email;
+          const doneQ = query(collection(db,"slots"),where("uid","==",uid),where("date","==",date));
+          const dSnap = await getDocs(doneQ);
+          let done=0,wip=0,skip=0;
+          dSnap.forEach(x=>{ const st=x.data().status; if(st==='done')done++; else if(st==='wip')wip++; else if(st==='skip')skip++; });
+          const summary = `✅ 완료 ${done}건 · ⏳ 진행중 ${wip}건 · ⛔ 불가 ${skip}건`;
+          await sendTelegram(name, date, summary);
+        }
+        renderCellContent(cellEl, payload);
+        closeModal();
+      };
+
+      if($('slot-del')) {
+        $('slot-del').onclick = async () => {
+          if(!confirm('이 슬롯을 삭제할까요?')) return;
+          await deleteDoc(doc(db,"slots",slotId));
+          renderCellContent(cellEl, null);
+          closeModal();
+        };
+      }
+    });
+  }
+
+  // ── 오늘 상세 뷰
+  function renderTodayDetail(uid, containerId) {
+    const wrap = $(containerId);
+    const dateStr = today();
+    wrap.innerHTML = `
+      <div class="section-title">📋 오늘 상세 — ${dateStr}</div>
+      <div class="two-col">
+        <div>
+          <div id="today-slots-list"></div>
+        </div>
+        <div>
+          <div class="card">
+            <div class="card-title"><span class="dot" style="background:#f59e0b"></span> 자체 피드백</div>
+            <textarea id="self-feedback" class="form-textarea" placeholder="오늘 이슈, 반성, 특이사항을 자유롭게 작성하세요" style="height:120px"></textarea>
+            <div class="card-title" style="margin-top:16px"><span class="dot" style="background:#5b8af0"></span> 내일 업무 계획</div>
+            <div id="tomorrow-slots"></div>
+            <button class="btn btn-outline" style="width:100%;margin-top:8px" onclick="addTomorrowTask()">+ 내일 업무 추가</button>
+            <div style="margin-top:16px;text-align:right">
+              <button class="btn btn-primary" onclick="saveDailyReport('${uid}')">💾 저장 및 보고</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+    loadTodaySlots(uid, dateStr);
+    loadDailyReport(uid, dateStr);
+  }
+
+  async function loadTodaySlots(uid, dateStr) {
+    const q = query(collection(db,"slots"),where("uid","==",uid),where("date","==",dateStr));
+    const snap = await getDocs(q);
+    const slots = [];
+    snap.forEach(d=>slots.push(d.data()));
+    slots.sort((a,b)=>a.hour.localeCompare(b.hour));
+
+    const list = $('today-slots-list');
+    if(!list) return;
+    list.innerHTML = '<div class="card-title"><span class="dot" style="background:#22c55e"></span> 오늘 시간별 업무</div>';
+
+    if(slots.length===0){
+      list.innerHTML += '<div class="empty-state">타임테이블에서 업무를 추가하세요</div>';
+      return;
+    }
+    slots.forEach(s=>{
+      const row = el('div','today-slot-row');
+      row.innerHTML = `
+        <div class="slot-time">${s.hour}</div>
+        <div class="slot-body">
+          <div class="slot-name">${s.title}</div>
+          ${s.memo?`<div class="slot-memo">${s.memo}</div>`:''}
+          ${s.bossComment?`<div class="boss-comment-inline">👑 ${s.bossComment}</div>`:''}
+        </div>
+        <div class="slot-st" style="color:${STATUS_COLOR[s.status]}">${STATUS_LABEL[s.status]||''}</div>
+      `;
+      list.appendChild(row);
+    });
+
+    // 실시간
+    const unsub = onSnapshot(q, snap2 => {
+      const arr=[];
+      snap2.forEach(d=>arr.push(d.data()));
+      arr.sort((a,b)=>a.hour.localeCompare(b.hour));
+      list.innerHTML = '<div class="card-title"><span class="dot" style="background:#22c55e"></span> 오늘 시간별 업무</div>';
+      arr.forEach(s=>{
+        const row=el('div','today-slot-row');
+        row.innerHTML=`<div class="slot-time">${s.hour}</div><div class="slot-body"><div class="slot-name">${s.title}</div>${s.memo?`<div class="slot-memo">${s.memo}</div>`:''} ${s.bossComment?`<div class="boss-comment-inline">👑 ${s.bossComment}</div>`:''}</div><div class="slot-st" style="color:${STATUS_COLOR[s.status]}">${STATUS_LABEL[s.status]||''}</div>`;
+        list.appendChild(row);
+      });
+    });
+    unsubListeners.push(unsub);
+  }
+
+  async function loadDailyReport(uid, dateStr) {
+    const snap = await getDoc(doc(db,"daily",`${uid}_${dateStr}`));
+    if(!snap.exists()) return;
+    const d = snap.data();
+    if($('self-feedback')) $('self-feedback').value = d.selfFeedback||'';
+    if(d.tomorrowTasks) {
+      d.tomorrowTasks.forEach(t=>addTomorrowTask(t));
+    }
+  }
+
+  window.addTomorrowTask = (val='') => {
+    const wrap = $('tomorrow-slots');
+    if(!wrap) return;
+    const row = el('div','tomorrow-row');
+    row.innerHTML = `<input class="form-input tomorrow-task" placeholder="내일 할 일" value="${val}"><button onclick="this.parentElement.remove()">✕</button>`;
+    wrap.appendChild(row);
+  };
+
+  window.saveDailyReport = async (uid) => {
+    const dateStr = today();
+    const feedback = $('self-feedback')?.value.trim()||'';
+    const tasks = [...document.querySelectorAll('.tomorrow-task')].map(i=>i.value.trim()).filter(Boolean);
+    await setDoc(doc(db,"daily",`${uid}_${dateStr}`), {
+      uid, date: dateStr,
+      selfFeedback: feedback,
+      tomorrowTasks: tasks,
+      updatedAt: Timestamp.now()
+    }, {merge:true});
+
+    // 텔레그램
+    const q = query(collection(db,"slots"),where("uid","==",uid),where("date","==",dateStr));
+    const snap = await getDocs(q);
+    let done=0,wip=0,undone=0;
+    snap.forEach(x=>{ const st=x.data().status; if(st==='done')done++; else if(st==='wip')wip++; else undone++; });
+    const name = userProfile.displayName||currentUser.email;
+    const summary = `✅ 완료 ${done}건 · ⏳ 진행중 ${wip}건 · 📋 예정/미완 ${undone}건\n💬 "${feedback.slice(0,60)}${feedback.length>60?'…':''}"`;
+    await sendTelegram(name, dateStr, summary);
+    alert('저장되었습니다.');
+  };
+
+  // ──────────────────────────────────────────
+  // ── 상사 뷰
+  // ──────────────────────────────────────────
+  async function renderBossView() {
+    const main = $('main-content');
+    main.innerHTML = '<div class="loading">직원 목록 불러오는 중...</div>';
+
+    const q = query(collection(db,"users"), where("role","==","staff"));
+    const snap = await getDocs(q);
+    const staffList = [];
+    snap.forEach(d=>staffList.push({uid:d.id,...d.data()}));
+
+    // 사이드바 렌더
+    const sidebar = $('sidebar');
+    sidebar.innerHTML = '<div class="sidebar-section">직원 목록</div>';
+
+    // 상태 뱃지 계산 (오늘 입력 여부)
+    const dateStr = today();
+    for(const s of staffList) {
+      const q2 = query(collection(db,"slots"),where("uid","==",s.uid),where("date","==",dateStr));
+      const sn = await getDocs(q2);
+      const hasInput = !sn.empty;
+
+      const item = el('div','staff-item');
+      item.dataset.uid = s.uid;
+      item.innerHTML = `
+        <div class="staff-avatar" style="background:${s.color||'#5b8af0'}">${(s.displayName||'?')[0]}</div>
+        <div class="staff-name">${s.displayName||s.email}</div>
+        <div class="staff-status ${hasInput?'status-ok':'status-none'}"></div>
+      `;
+      item.addEventListener('click', ()=>selectStaff(s, staffList));
+      sidebar.appendChild(item);
+    }
+
+    // 전체 보기 버튼
+    const all = el('div','view-all');
+    all.innerHTML = '📊 팀 전체 보기';
+    all.addEventListener('click', ()=>renderTeamOverview(staffList));
+    sidebar.appendChild(all);
+
+    // 기본: 첫 직원
+    if(staffList.length>0) selectStaff(staffList[0], staffList);
+    else main.innerHTML = '<div class="empty-state">등록된 직원이 없습니다</div>';
+  }
+
+  function selectStaff(s, staffList) {
+    selectedStaffUid = s.uid;
+    document.querySelectorAll('.staff-item').forEach(i=>i.classList.toggle('active',i.dataset.uid===s.uid));
+    renderBossStaffDetail(s);
+  }
+
+  function renderBossStaffDetail(s) {
+    unsubListeners.forEach(u=>u()); unsubListeners=[];
+    const main = $('main-content');
+    main.innerHTML = `
+      <div class="page-header">
+        <div style="display:flex;align-items:center;gap:12px">
+          <div class="staff-header-avatar" style="background:${s.color||'#5b8af0'}">${(s.displayName||'?')[0]}</div>
+          <div>
+            <div class="page-title">${s.displayName||s.email}</div>
+            <div class="page-sub" id="staff-meta">로딩 중...</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-outline" onclick="openAddTaskModal('${s.uid}','${s.displayName||s.email}')">📎 업무 배정</button>
+          <button class="btn btn-primary" onclick="openBossCommentModal('${s.uid}','${s.displayName||s.email}')">💬 지시 보내기</button>
+        </div>
+      </div>
+      <div id="boss-week-wrap"></div>
+      <div class="two-col" style="margin-top:20px">
+        <div id="boss-today-slots"></div>
+        <div id="boss-feedback-wrap"></div>
+      </div>
+    `;
+    renderWeekTimetable(s.uid, 'boss-week-wrap');
+    loadBossTodayView(s);
+  }
+
+  async function loadBossTodayView(s) {
+    const dateStr = today();
+    const slotsQ = query(collection(db,"slots"),where("uid","==",s.uid),where("date","==",dateStr));
+    const dailyRef = doc(db,"daily",`${s.uid}_${dateStr}`);
+
+    // 메타
+    const sn = await getDocs(slotsQ);
+    let done=0,total=0;
+    sn.forEach(d=>{total++;if(d.data().status==='done')done++;});
+    const meta = $('staff-meta');
+    if(meta) meta.textContent = `오늘 완료 ${done}/${total}건 · ${dateStr}`;
+
+    // 슬롯 목록
+    const slotsWrap = $('boss-today-slots');
+    if(slotsWrap) {
+      slotsWrap.innerHTML = '<div class="card-title"><span class="dot" style="background:#22c55e"></span> 오늘 시간별 업무</div>';
+      sn.forEach(d=>{
+        const sl = d.data();
+        const row = el('div','today-slot-row');
+        row.innerHTML = `
+          <div class="slot-time">${sl.hour}</div>
+          <div class="slot-body">
+            <div class="slot-name">${sl.title}</div>
+            ${sl.memo?`<div class="slot-memo">${sl.memo}</div>`:''}
+          </div>
+          <div class="slot-st" style="color:${STATUS_COLOR[sl.status]}">${STATUS_LABEL[sl.status]||''}</div>
+          <div style="display:flex;gap:4px;margin-left:8px">
+            <button class="btn-sm btn-approve" onclick="approveSlot('${d.id}',true)">승인</button>
+            <button class="btn-sm btn-return" onclick="approveSlot('${d.id}',false)">반려</button>
+          </div>
+        `;
+        slotsWrap.appendChild(row);
+      });
+    }
+
+    // 피드백
+    const dSnap = await getDoc(dailyRef);
+    const dData = dSnap.exists()?dSnap.data():{};
+    const fbWrap = $('boss-feedback-wrap');
+    if(fbWrap) {
+      fbWrap.innerHTML = `
+        <div class="card">
+          <div class="card-title"><span class="dot" style="background:#f59e0b"></span> 자체 피드백</div>
+          <div class="feedback-box">${dData.selfFeedback||'(아직 입력하지 않음)'}</div>
+          <div class="card-title" style="margin-top:16px"><span class="dot" style="background:#5b8af0"></span> 내일 업무 계획</div>
+          <div class="feedback-box">${(dData.tomorrowTasks||[]).map((t,i)=>`${i+1}. ${t}`).join('<br>')||'(아직 입력하지 않음)'}</div>
+          <div class="card-title" style="margin-top:16px"><span class="dot" style="background:#7ab040"></span> 관리자 코멘트 달기</div>
+          <textarea id="boss-comment-input" class="form-textarea" placeholder="직원에게 코멘트를 남기세요" style="height:80px">${dData.bossComment||''}</textarea>
+          <div style="text-align:right;margin-top:8px">
+            <button class="btn btn-primary" onclick="saveBossComment('${s.uid}','${dateStr}')">코멘트 저장</button>
+          </div>
+        </div>
+      `;
+    }
+  }
+
+  window.approveSlot = async (slotId, approved) => {
+    await setDoc(doc(db,"slots",slotId),{ approved, approvedAt: Timestamp.now(), approvedBy: currentUser.uid },{merge:true});
+    alert(approved?'승인했습니다.':'반려했습니다.');
+  };
+
+  window.saveBossComment = async (uid, dateStr) => {
+    const comment = $('boss-comment-input')?.value.trim()||'';
+    await setDoc(doc(db,"daily",`${uid}_${dateStr}`),{ bossComment: comment, bossCommentAt: Timestamp.now() },{merge:true});
+    alert('코멘트가 저장되었습니다.');
+  };
+
+  window.openAddTaskModal = (uid, name) => {
+    const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate()+1);
+    const tStr = tomorrow.toISOString().slice(0,10);
+    showModal(`
+      <div class="modal-title">📎 업무 배정 — ${name}</div>
+      <div class="form-group"><label>날짜</label><input id="at-date" type="date" class="form-input" value="${tStr}"></div>
+      <div class="form-group"><label>시간 슬롯</label>
+        <select id="at-hour" class="form-input">${HOURS.map(h=>`<option>${h}</option>`).join('')}</select>
+      </div>
+      <div class="form-group"><label>업무 내용</label><input id="at-title" class="form-input" placeholder="업무 내용"></div>
+      <div class="form-group"><label>메모 (선택)</label><textarea id="at-memo" class="form-textarea" placeholder="상세 지시사항"></textarea></div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" onclick="closeModal()">취소</button>
+        <button class="btn btn-primary" onclick="saveAddedTask('${uid}')">배정</button>
+      </div>
+    `);
+  };
+
+  window.saveAddedTask = async (uid) => {
+    const date  = $('at-date').value;
+    const hour  = $('at-hour').value;
+    const title = $('at-title').value.trim();
+    const memo  = $('at-memo').value.trim();
+    if(!title){ alert('업무 내용을 입력하세요'); return; }
+    const slotId = `${uid}_${date}_${hour.replace(':','')}`;
+    await setDoc(doc(db,"slots",slotId),{
+      uid, date, hour, title, memo, status:'todo',
+      weekStart: weekStart(new Date(date)),
+      assignedBy: currentUser.uid,
+      updatedAt: Timestamp.now()
+    },{merge:true});
+    closeModal();
+    alert('업무가 배정되었습니다.');
+  };
+
+  window.openBossCommentModal = (uid, name) => {
+    showModal(`
+      <div class="modal-title">💬 지시 보내기 — ${name}</div>
+      <div class="form-group"><label>지시 내용</label><textarea id="direct-msg" class="form-textarea" style="height:120px" placeholder="직원에게 전달할 지시사항을 입력하세요"></textarea></div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" onclick="closeModal()">취소</button>
+        <button class="btn btn-primary" onclick="sendDirectMessage('${uid}')">전송</button>
+      </div>
+    `);
+  };
+
+  window.sendDirectMessage = async (uid) => {
+    const msg = $('direct-msg')?.value.trim()||'';
+    if(!msg){ alert('내용을 입력하세요'); return; }
+    const dateStr = today();
+    await setDoc(doc(db,"daily",`${uid}_${dateStr}`),{
+      bossComment: msg, bossCommentAt: Timestamp.now(), bossCommentBy: currentUser.uid
+    },{merge:true});
+    closeModal();
+    alert('지시가 전달되었습니다.');
+  };
+
+  // ── 팀 전체 보기
+  async function renderTeamOverview(staffList) {
+    document.querySelectorAll('.staff-item').forEach(i=>i.classList.remove('active'));
+    const main = $('main-content');
+    const dateStr = today();
+    main.innerHTML = `
+      <div class="page-header">
+        <div class="page-title">📊 팀 전체 현황 — ${dateStr}</div>
+      </div>
+      <div class="team-grid" id="team-grid"></div>
+    `;
+    const grid = $('team-grid');
+    for(const s of staffList) {
+      const q = query(collection(db,"slots"),where("uid","==",s.uid),where("date","==",dateStr));
+      const sn = await getDocs(q);
+      let done=0,wip=0,undone=0;
+      sn.forEach(d=>{ const st=d.data().status; if(st==='done')done++; else if(st==='wip')wip++; else undone++; });
+      const total = done+wip+undone;
+      const pct = total>0?Math.round(done/total*100):0;
+
+      const dSnap = await getDoc(doc(db,"daily",`${s.uid}_${dateStr}`));
+      const feedback = dSnap.exists()?dSnap.data().selfFeedback||'':'';
+
+      const card = el('div','team-card');
+      card.innerHTML = `
+        <div class="team-card-header">
+          <div class="staff-avatar" style="background:${s.color||'#5b8af0'}">${(s.displayName||'?')[0]}</div>
+          <div>
+            <div style="font-weight:700;color:#fff">${s.displayName||s.email}</div>
+            <div style="font-size:11px;color:#6b7090">완료 ${done}/${total}건</div>
+          </div>
+          <div style="margin-left:auto;font-size:20px;font-weight:800;color:${pct>=80?'#22c55e':pct>=50?'#f59e0b':'#ef4444'}">${pct}%</div>
+        </div>
+        <div class="progress-bar"><div style="width:${pct}%;background:${pct>=80?'#22c55e':pct>=50?'#f59e0b':'#ef4444'}"></div></div>
+        <div class="team-stats">
+          <span style="color:#22c55e">✅ ${done}</span>
+          <span style="color:#f59e0b">⏳ ${wip}</span>
+          <span style="color:#6b7090">📋 ${undone}</span>
+        </div>
+        ${feedback?`<div class="team-feedback">"${feedback.slice(0,80)}${feedback.length>80?'…':''}"</div>`:'<div class="team-feedback no-input">아직 피드백 없음</div>'}
+        <button class="btn btn-outline" style="width:100%;margin-top:10px;font-size:11px" onclick="">상세 보기 →</button>
+      `;
+      // 상세 보기 연결
+      card.querySelector('button').addEventListener('click',()=>selectStaff(s,staffList));
+      grid.appendChild(card);
+    }
+  }
+
+  // ──────────────────────────────────────────
+  // 모달
+  // ──────────────────────────────────────────
+  window.showModal = (html) => {
+    $('modal-body').innerHTML = html;
+    $('modal-overlay').style.display = 'flex';
+  };
+  window.closeModal = () => { $('modal-overlay').style.display = 'none'; };
+  $('modal-overlay')?.addEventListener('click', e => { if(e.target===$('modal-overlay'))closeModal(); });
+</script>
+
+<style>
+/* ── 리셋 & 기본 */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, 'Malgun Gothic', '맑은 고딕', sans-serif; background: #0f1117; color: #e0e2ec; min-height: 100vh; font-size: 14px; }
+
+/* ── 로그인 */
+#login-screen { display:flex; align-items:center; justify-content:center; min-height:100vh; background:#0f1117; }
+.login-box { background:#161922; border:1px solid #252836; border-radius:16px; padding:40px 36px; width:360px; }
+.login-logo { font-size:22px; font-weight:800; color:#fff; margin-bottom:4px; letter-spacing:-0.5px; }
+.login-logo span { color:#5b8af0; }
+.login-sub { font-size:13px; color:#6b6f85; margin-bottom:28px; }
+.login-label { font-size:12px; color:#8b8fa8; font-weight:600; margin-bottom:6px; display:block; }
+.login-input { width:100%; background:#0f1117; border:1px solid #252836; border-radius:8px; color:#e0e2ec; font-size:14px; padding:10px 12px; outline:none; margin-bottom:12px; }
+.login-input:focus { border-color:#5b8af0; }
+.login-btn { width:100%; padding:11px; background:#5b8af0; color:#fff; border:none; border-radius:8px; font-size:14px; font-weight:700; cursor:pointer; margin-top:4px; }
+.login-btn:hover { background:#4a79df; }
+.login-err { font-size:12px; color:#ef4444; margin-top:10px; min-height:18px; }
+
+/* ── 앱 레이아웃 */
+#app-screen { display:none; flex-direction:column; height:100vh; }
+.top-nav { display:flex; align-items:center; background:#161922; border-bottom:1px solid #252836; padding:0 20px; height:52px; gap:0; flex-shrink:0; }
+.nav-logo { font-size:15px; font-weight:800; color:#fff; margin-right:24px; letter-spacing:-0.3px; }
+.nav-logo span { color:#5b8af0; }
+.nav-right { margin-left:auto; display:flex; align-items:center; gap:10px; }
+.role-badge { background:#1e2235; border:1px solid #252836; color:#8b8fa8; font-size:11px; padding:3px 10px; border-radius:20px; }
+.role-badge.boss { color:#f59e0b; border-color:#f59e0b; background:#1e1a0e; }
+.user-name { font-size:13px; color:#8b8fa8; }
+.logout-btn { font-size:12px; color:#4a4e63; cursor:pointer; padding:4px 8px; border-radius:6px; border:1px solid #252836; background:transparent; }
+.logout-btn:hover { color:#ef4444; border-color:#ef4444; }
+
+.app-body { display:flex; flex:1; overflow:hidden; }
+
+/* ── 사이드바 */
+#sidebar { width:188px; background:#161922; border-right:1px solid #252836; overflow-y:auto; padding:14px 0; flex-shrink:0; }
+.sidebar-section { font-size:10px; font-weight:700; color:#4a4e63; padding:0 14px 8px; letter-spacing:1.2px; text-transform:uppercase; }
+.staff-item { display:flex; align-items:center; gap:9px; padding:8px 14px; cursor:pointer; transition:background .12s; }
+.staff-item:hover, .staff-item.active { background:#1e2235; }
+.staff-item.active .staff-name { color:#fff; }
+.staff-avatar { width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; color:#fff; flex-shrink:0; }
+.staff-name { font-size:13px; color:#8b8fa8; flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.staff-status { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
+.status-ok { background:#22c55e; }
+.status-warn { background:#f59e0b; }
+.status-none { background:#2a2d3a; }
+.view-all { display:flex; align-items:center; gap:8px; padding:10px 14px; cursor:pointer; font-size:13px; color:#5b8af0; border-top:1px solid #252836; margin-top:8px; }
+.view-all:hover { background:#1e2235; }
+
+/* ── 메인 */
+#main-content { flex:1; overflow-y:auto; padding:22px 24px; }
+.loading { color:#4a4e63; padding:40px; text-align:center; }
+.empty-state { color:#4a4e63; padding:24px; text-align:center; background:#161922; border-radius:8px; border:1px dashed #252836; font-size:13px; }
+
+/* ── 페이지 헤더 */
+.page-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:20px; }
+.page-title { font-size:18px; font-weight:800; color:#fff; letter-spacing:-0.3px; }
+.page-sub { font-size:12px; color:#6b6f85; margin-top:3px; }
+.staff-header-avatar { width:40px; height:40px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:17px; font-weight:700; color:#fff; }
+
+/* ── 주간 그리드 */
+.section-title { font-size:11px; font-weight:700; color:#4a4e63; text-transform:uppercase; letter-spacing:1px; margin-bottom:10px; }
+.week-grid { background:#161922; border:1px solid #252836; border-radius:12px; overflow:hidden; margin-bottom:20px; }
+.week-header-row { display:grid; grid-template-columns:60px repeat(5,1fr); border-bottom:1px solid #252836; }
+.time-col-hdr { padding:8px; }
+.day-hdr { padding:8px 6px; text-align:center; font-size:12px; font-weight:700; color:#6b7090; border-left:1px solid #252836; line-height:1.4; }
+.day-hdr.today { color:#5b8af0; background:#141828; }
+.day-date { font-size:10px; font-weight:400; color:#4a4e63; }
+.week-row { display:grid; grid-template-columns:60px repeat(5,1fr); border-bottom:1px solid #1a1d28; }
+.week-row:last-child { border-bottom:none; }
+.time-col { padding:8px 8px; font-size:11px; color:#4a4e63; display:flex; align-items:center; }
+.week-cell { border-left:1px solid #1a1d28; min-height:52px; padding:4px; cursor:pointer; transition:background .1s; position:relative; }
+.week-cell:hover { background:#1a1d28; }
+.week-cell.today-col { background:#0f1421; }
+.week-cell.has-data { cursor:pointer; }
+.slot-chip { padding:4px 6px; border-radius:5px; background:#1e2235; border-left:3px solid #5b8af0; height:100%; min-height:44px; }
+.slot-title { font-size:11px; color:#c8cad8; line-height:1.3; margin-bottom:2px; }
+.slot-status { font-size:10px; font-weight:600; }
+
+/* ── 오늘 상세 */
+.two-col { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+.card { background:#161922; border:1px solid #252836; border-radius:12px; padding:16px; }
+.card-title { font-size:12px; font-weight:700; color:#c0c2d0; margin-bottom:12px; display:flex; align-items:center; gap:7px; }
+.dot { width:8px; height:8px; border-radius:50%; display:inline-block; flex-shrink:0; }
+.today-slot-row { display:flex; align-items:flex-start; gap:10px; padding:9px 0; border-bottom:1px solid #1a1d28; }
+.today-slot-row:last-child { border-bottom:none; }
+.slot-time { font-size:11px; color:#4a4e63; font-weight:600; width:40px; flex-shrink:0; padding-top:2px; }
+.slot-body { flex:1; }
+.slot-name { font-size:13px; color:#c8cad8; }
+.slot-memo { font-size:11px; color:#6b7090; margin-top:2px; }
+.slot-st { font-size:11px; font-weight:600; flex-shrink:0; padding-top:2px; }
+.boss-comment-inline { font-size:11px; color:#7ab040; margin-top:4px; background:#14180e; border-radius:4px; padding:3px 7px; }
+
+/* ── 팀 전체 */
+.team-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:14px; }
+.team-card { background:#161922; border:1px solid #252836; border-radius:12px; padding:16px; }
+.team-card-header { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+.progress-bar { background:#1e2235; border-radius:4px; height:5px; overflow:hidden; margin-bottom:10px; }
+.progress-bar > div { height:100%; border-radius:4px; transition:width .3s; }
+.team-stats { display:flex; gap:14px; font-size:12px; font-weight:600; margin-bottom:10px; }
+.team-feedback { font-size:12px; color:#6b7090; font-style:italic; line-height:1.5; }
+.team-feedback.no-input { color:#3a3d4e; }
+
+/* ── 폼 공통 */
+.form-group { margin-bottom:14px; }
+.form-group label { font-size:12px; color:#8b8fa8; font-weight:600; display:block; margin-bottom:5px; }
+.form-input { width:100%; background:#0f1117; border:1px solid #252836; border-radius:7px; color:#e0e2ec; font-size:13px; padding:9px 11px; outline:none; }
+.form-input:focus { border-color:#5b8af0; }
+.form-textarea { width:100%; background:#0f1117; border:1px solid #252836; border-radius:7px; color:#e0e2ec; font-size:13px; padding:9px 11px; outline:none; resize:vertical; height:80px; font-family:inherit; }
+.form-textarea:focus { border-color:#5b8af0; }
+
+/* ── 상태 버튼 */
+.status-btns { display:flex; gap:6px; flex-wrap:wrap; }
+.status-btn { padding:6px 12px; border-radius:6px; background:#1e2235; border:1px solid #252836; color:#6b7090; font-size:12px; cursor:pointer; transition:all .12s; }
+.status-btn.active { background:color-mix(in srgb,var(--sc) 15%,#0f1117); border-color:var(--sc); color:var(--sc); font-weight:700; }
+
+/* ── 버튼 */
+.btn { padding:7px 14px; border-radius:7px; font-size:12px; font-weight:600; cursor:pointer; border:none; display:inline-flex; align-items:center; gap:5px; transition:all .12s; }
+.btn-primary { background:#5b8af0; color:#fff; }
+.btn-primary:hover { background:#4a79df; }
+.btn-outline { background:transparent; color:#8b8fa8; border:1px solid #252836; }
+.btn-outline:hover { color:#fff; border-color:#5b8af0; }
+.btn-danger { background:#2e1a1a; color:#ef4444; border:1px solid #4a2020; }
+.btn-sm { padding:3px 8px; border-radius:5px; font-size:11px; font-weight:600; cursor:pointer; border:none; }
+.btn-approve { background:#1a2e1f; color:#22c55e; border:1px solid #2a4432; }
+.btn-return  { background:#2e1a1a; color:#ef4444;  border:1px solid #4a2020; }
+
+/* ── 내일 업무 */
+.tomorrow-row { display:flex; gap:6px; margin-bottom:6px; align-items:center; }
+.tomorrow-row button { background:transparent; border:none; color:#4a4e63; cursor:pointer; font-size:14px; flex-shrink:0; }
+.tomorrow-row button:hover { color:#ef4444; }
+
+/* ── 피드백 박스 */
+.feedback-box { background:#1a1d2a; border:1px solid #252836; border-radius:7px; padding:11px; font-size:13px; color:#8b8fa8; line-height:1.7; }
+
+/* ── 모달 */
+#modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:100; align-items:center; justify-content:center; backdrop-filter:blur(2px); }
+.modal-box { background:#161922; border:1px solid #252836; border-radius:14px; width:460px; max-width:95vw; max-height:90vh; overflow-y:auto; padding:24px; }
+.modal-title { font-size:15px; font-weight:800; color:#fff; margin-bottom:20px; }
+.modal-footer { display:flex; gap:8px; justify-content:flex-end; margin-top:20px; padding-top:16px; border-top:1px solid #252836; }
+
+/* ── 스크롤바 */
+::-webkit-scrollbar { width:4px; height:4px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:#252836; border-radius:2px; }
+</style>
+</head>
+<body>
+
+<!-- ── 로그인 화면 -->
+<div id="login-screen">
+  <div class="login-box">
+    <div class="login-logo">Work<span>Board</span></div>
+    <div class="login-sub">업무 현황 관리 시스템</div>
+    <label class="login-label">아이디</label>
+    <input id="login-id" class="login-input" placeholder="아이디 입력" autocomplete="username" onkeydown="if(event.key==='Enter')document.getElementById('login-pw').focus()">
+    <label class="login-label">비밀번호</label>
+    <input id="login-pw" class="login-input" type="password" placeholder="비밀번호 입력" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+    <button class="login-btn" onclick="doLogin()">로그인</button>
+    <div id="login-err" class="login-err"></div>
+  </div>
+</div>
+
+<!-- ── 앱 화면 -->
+<div id="app-screen">
+  <!-- 상단 네비 -->
+  <div class="top-nav">
+    <div class="nav-logo">Work<span>Board</span></div>
+    <div class="nav-right">
+      <span class="user-name" id="user-name-badge"></span>
+      <div id="role-badge" class="role-badge"></div>
+      <button class="logout-btn" onclick="doLogout()">로그아웃</button>
+    </div>
+  </div>
+
+  <!-- 앱 바디 -->
+  <div class="app-body">
+    <div id="sidebar"></div>
+    <div id="main-content"></div>
+  </div>
+</div>
+
+<!-- 모달 -->
+<div id="modal-overlay">
+  <div class="modal-box" id="modal-body"></div>
+</div>
+
+</body>
+</html>
