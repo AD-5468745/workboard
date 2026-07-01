@@ -484,6 +484,7 @@
     const we = (userProfile && userProfile.workEnd) || DEFAULT_END;
     wrap.innerHTML = `
       <div class="section-title">📋 오늘 상세 — ${dateStr}</div>
+      <div id="today-status"></div>
 
       <div class="card" style="border-color:#3a3f6b;margin-bottom:16px">
         <div class="card-title"><span class="dot" style="background:#5b8af0"></span> 오늘 업무 — 그냥 쭉 쓰기 (자동 정리)</div>
@@ -542,6 +543,29 @@
     renderGoalRows([]);
     loadTodaySlots(uid, dateStr);
     loadDailyReport(uid, dateStr);
+    renderTodayStatus(uid, dateStr);
+  }
+
+  // 일지 완성도 + 어제 개선점 리마인드
+  async function renderTodayStatus(uid, dateStr){
+    const box = $('today-status'); if(!box) return;
+    const y = new Date(dateStr); y.setDate(y.getDate()-1); const yStr = y.toISOString().slice(0,10);
+    const [ySnap, tSnap, slotSnap] = await Promise.all([
+      getDoc(doc(db,"daily",`${uid}_${yStr}`)),
+      getDoc(doc(db,"daily",`${uid}_${dateStr}`)),
+      getDocs(query(collection(db,"slots"),where("uid","==",uid),where("date","==",dateStr)))
+    ]);
+    const yImprove = ySnap.exists()?(ySnap.data().improve||'').trim():'';
+    const t = tSnap.exists()?tSnap.data():{};
+    const goals = (t.topGoals||[]).filter(g=>(g.text||'').trim()).length;
+    const has = { '출근':!!t.clockIn, '시간표':slotSnap.size>0, '목표':goals>0, '회고':!!((t.selfFeedback||'').trim()||(t.improve||'').trim()) };
+    const keys = Object.keys(has); const missing = keys.filter(k=>!has[k]);
+    const pct = Math.round((keys.length-missing.length)/keys.length*100);
+    const color = pct>=100?'#22c55e':pct>=50?'#f59e0b':'#ef4444';
+    let html = '';
+    if(yImprove) html += `<div style="background:#141c2e;border:1px solid #26406b;border-radius:8px;padding:8px 12px;font-size:12px;color:#8fb0f0;margin-bottom:8px">💡 어제 개선점: ${esc(yImprove)}</div>`;
+    html += `<div style="background:#161922;border:1px solid #252836;border-radius:8px;padding:8px 12px;font-size:12px;margin-bottom:8px"><b style="color:${color}">오늘 일지 완성도 ${pct}%</b> · ${keys.map(k=>`${has[k]?'✅':'⬜'} ${k}`).join(' · ')}${missing.length?` <span style="color:#f59e0b">— ${missing.join(', ')} 비었어요</span>`:' 👍'}</div>`;
+    box.innerHTML = html;
   }
 
   // 핵심목표 3줄 렌더 (체크 + 텍스트)
@@ -888,8 +912,15 @@
   }
 
   window.approveSlot = async (slotId, approved) => {
-    await setDoc(doc(db,"slots",slotId),{ approved, approvedAt: Timestamp.now(), approvedBy: currentUser.uid },{merge:true});
-    alert(approved?'승인했습니다.':'반려했습니다.');
+    let reason = '';
+    if(!approved){
+      reason = (prompt('반려 사유를 입력하세요 (직원에게 전달됩니다)')||'').trim();
+      if(!reason){ alert('반려하려면 사유가 필요합니다.'); return; }
+    }
+    const payload = { approved, approvedAt: Timestamp.now(), approvedBy: currentUser.uid };
+    if(!approved) payload.bossComment = '[반려] ' + reason;
+    await setDoc(doc(db,"slots",slotId), payload, {merge:true});
+    alert(approved?'승인했습니다.':'반려했습니다(사유가 직원에게 전달됨).');
   };
 
   window.saveBossComment = async (uid, dateStr) => {
@@ -964,12 +995,14 @@
       <div class="page-header">
         <div class="page-title">📊 팀 전체 현황 — ${dateStr}</div>
       </div>
+      <div id="team-alerts"></div>
       <div id="team-banner"></div>
       <div class="team-grid" id="team-grid"></div>
     `;
     const grid = $('team-grid');
     const blockers = [];
     const helps = [];
+    const alerts = [];
     for(const s of staffList) {
       const q = query(collection(db,"slots"),where("uid","==",s.uid),where("date","==",dateStr));
       const sn = await getDocs(q);
@@ -987,6 +1020,20 @@
       const goalsDone = goals.filter(g=>g.done).length;
       const blocker = (dd.blocker||'').trim();
       if(blocker && !dd.blockerResolved) blockers.push({name:s.displayName||s.email, text:blocker});
+
+      // 이상신호 자동감지
+      const anom = [];
+      if(dd.clockIn && total===0) anom.push('출근했으나 업무 미기록');
+      const anyMemo = sn.docs.some(x=>(x.data().memo||'').trim());
+      if(total>0 && done===total && !anyMemo && !feedback.trim()) anom.push('전부 완료·근거 없음');
+      try {
+        const dAll = await getDocs(query(collection(db,"daily"),where("uid","==",s.uid)));
+        const daysArr = []; dAll.forEach(x=>daysArr.push(x.data()));
+        daysArr.sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+        const recent3 = daysArr.slice(0,3);
+        if(recent3.length>=3 && recent3.every(day=>{ const g=day.topGoals||[]; return g.length===0 || g.filter(x=>x.done).length < g.length; })) anom.push('목표 3일 연속 미달');
+      } catch(e){}
+      anom.forEach(a=>alerts.push({name:s.displayName||s.email, text:a}));
 
       const att = dd.clockIn
         ? `출근 ${dd.clockIn} · ${li.late?`<span style="color:#f59e0b;font-weight:700">지각 ${li.mins}분</span>`:`<span style="color:#22c55e">정상</span>`}${dd.clockOut?` · 퇴근 ${dd.clockOut}`:''}`
@@ -1010,11 +1057,17 @@
           <span style="color:#8fb0f0;margin-left:auto">🎯 ${goalsDone}/${goals.length}</span>
         </div>
         ${blocker?`<div style="font-size:11px;font-weight:700;color:#ef8f8f;background:#221012;border:1px solid #4a2020;border-radius:6px;padding:4px 8px;margin-top:8px">🚨 ${blocker}</div>`:''}
+        ${anom.length?`<div style="font-size:11px;font-weight:700;color:#f5c26b;background:#1a1408;border:1px solid #5a3a12;border-radius:6px;padding:4px 8px;margin-top:6px">⚠️ ${esc(anom.join(' · '))}</div>`:''}
         ${feedback?`<div class="team-feedback">"${feedback.slice(0,80)}${feedback.length>80?'…':''}"</div>`:'<div class="team-feedback no-input">아직 피드백 없음</div>'}
         <button class="btn btn-outline" style="width:100%;margin-top:10px;font-size:11px">상세 보기 →</button>
       `;
       card.querySelector('button').addEventListener('click',()=>selectStaff(s,staffList));
       grid.appendChild(card);
+    }
+    const awrap = $('team-alerts');
+    if(awrap && alerts.length){
+      awrap.innerHTML = `<div style="background:#1a1408;border:1px solid #5a3a12;border-radius:12px;padding:12px 16px;margin-bottom:16px;font-size:13px;color:#f0d0a0">`+
+        `<b style="color:#f59e0b">⚠️ 주목 ${alerts.length}건</b> · ${alerts.map(a=>esc(`${a.name}: ${a.text}`)).join(' · ')}</div>`;
     }
     const bwrap = $('team-banner');
     const items = [];
