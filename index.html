@@ -227,10 +227,12 @@
         <div style="display:flex;gap:8px">
           <button class="btn btn-outline" onclick="switchTab('week')">📅 주간 계획</button>
           <button class="btn btn-primary" onclick="switchTab('today')">📋 오늘 상세</button>
+          <button class="btn btn-outline" onclick="switchTab('history')">🗂 지난 기록</button>
         </div>
       </div>
       <div id="tab-week" class="tab-panel"></div>
       <div id="tab-today" class="tab-panel" style="display:none"></div>
+      <div id="tab-history" class="tab-panel" style="display:none"></div>
     `;
     $('main-content').appendChild(wrap);
     renderWeekTimetable(uid, 'tab-week', hoursRange(userProfile.workStart, userProfile.workEnd));
@@ -240,6 +242,8 @@
   window.switchTab = (tab) => {
     $('tab-week').style.display  = tab==='week'  ? '' : 'none';
     $('tab-today').style.display = tab==='today' ? '' : 'none';
+    if($('tab-history')) $('tab-history').style.display = tab==='history' ? '' : 'none';
+    if(tab==='history' && currentUser) renderHistory(currentUser.uid, 'tab-history');
   };
 
   // ── 주간 타임테이블 (직원)
@@ -310,9 +314,25 @@
     cell.classList.add('has-data');
     const chip = el('div','slot-chip');
     chip.style.borderLeftColor = STATUS_COLOR[s.status]||'#6b7280';
-    chip.innerHTML = `<div class="slot-title">${s.title}</div><div class="slot-status" style="color:${STATUS_COLOR[s.status]}">${STATUS_LABEL[s.status]||''}</div>`;
+    const badge = (s.needsHelp?` <span style="color:#f59e0b;font-size:10px">🆘</span>`:'') + ((s.links||[]).length?` <span style="color:#8fb0f0;font-size:10px">🔗${s.links.length}</span>`:'');
+    chip.innerHTML = `<div class="slot-title">${s.title}${badge}</div><div class="slot-status" style="color:${STATUS_COLOR[s.status]}">${STATUS_LABEL[s.status]||''}</div>`;
     cell.appendChild(chip);
   }
+
+  // ── 링크/도움요청 헬퍼 ──
+  const isValidUrl = u => /^https?:\/\/\S+$/i.test((u||'').trim());
+  const esc = s => (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  window.addLinkRow = (label='', url='') => {
+    const box = $('s-links'); if(!box) return;
+    const row = el('div','tomorrow-row');
+    row.innerHTML = `<input class="form-input link-label" placeholder="이름(예: 시트)" style="width:120px" value="${esc(label)}">`+
+      `<input class="form-input link-url" placeholder="https://..." value="${esc(url)}">`+
+      `<button type="button" onclick="this.parentElement.remove()" style="background:transparent;border:none;color:#4a4e63;cursor:pointer">✕</button>`;
+    box.appendChild(row);
+  };
+  // 링크칩(클릭 새 탭)
+  const linkPills = (links) => (links||[]).filter(l=>isValidUrl(l.url))
+    .map(l=>`<a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;gap:4px;background:#141c2e;border:1px solid #26406b;color:#8fb0f0;border-radius:20px;padding:2px 9px;font-size:11px;text-decoration:none;margin:3px 4px 0 0">🔗 ${esc(l.label||'링크')}</a>`).join('');
 
   // ── 슬롯 모달
   function openSlotModal(uid, date, hour, cellEl) {
@@ -340,6 +360,16 @@
           <label>메모 (선택)</label>
           <textarea id="s-memo" class="form-textarea" placeholder="상세 내용, 이슈 등">${d.memo||''}</textarea>
         </div>
+        <div class="form-group">
+          <label>🔗 관련 링크 (도메인·구글시트 등 · 여러 개 가능)</label>
+          <div id="s-links"></div>
+          <button type="button" class="btn btn-outline" style="margin-top:6px" onclick="addLinkRow()">＋ 링크 추가</button>
+        </div>
+        ${isOwner?`<div class="form-group" style="border:1px solid #4a2020;border-radius:8px;padding:10px;background:#1a1012">
+          <label class="row" style="gap:6px;color:#f59e0b;cursor:pointer;display:flex;align-items:center"><input type="checkbox" id="s-help" ${d.needsHelp&&!d.helpResolved?'checked':''}> 🆘 이 업무 관리자에게 도움요청</label>
+          <input id="s-help-note" class="form-input" style="margin-top:6px" placeholder="어디가 어려운지 한 줄 (선택)" value="${esc(d.helpNote)}">
+        </div>`:''}
+        ${isBoss&&d.needsHelp&&!d.helpResolved?`<div class="form-group"><button type="button" class="btn btn-outline" id="slot-resolve" style="color:#22c55e;border-color:#204d36">✅ 도움요청 해결로 표시</button></div>`:''}
         ${isBoss&&!isOwner?`<div class="form-group"><label>관리자 코멘트</label><textarea id="s-comment" class="form-textarea" placeholder="직원에게 보낼 코멘트">${d.bossComment||''}</textarea></div>`:''}
         <div class="modal-footer">
           ${d.title?`<button class="btn btn-danger" id="slot-del">삭제</button>`:''}
@@ -358,16 +388,31 @@
         });
       });
 
+      // 링크 행 채우기(없으면 빈 행 1개)
+      (d.links||[]).forEach(l=>addLinkRow(l.label,l.url));
+      if(!(d.links&&d.links.length)) addLinkRow();
+
+      // 관리자: 도움요청 해결
+      if($('slot-resolve')) $('slot-resolve').onclick = async () => {
+        await setDoc(doc(db,"slots",slotId), { needsHelp:false, updatedAt:Timestamp.now() }, {merge:true});
+        alert('도움요청을 해결로 표시했습니다.'); closeModal();
+      };
+
       $('slot-save').onclick = async () => {
         const title = $('s-title').value.trim();
         if(!title){ alert('업무 내용을 입력하세요'); return; }
+        const links = [...document.querySelectorAll('#s-links .tomorrow-row')]
+          .map(r=>({ label:r.querySelector('.link-label').value.trim(), url:r.querySelector('.link-url').value.trim() }))
+          .filter(l=>isValidUrl(l.url));
         const payload = {
           uid, date, hour, title,
           status: selStatus,
           memo: $('s-memo').value.trim(),
+          links,
           weekStart: weekStart(new Date(date)),
           updatedAt: Timestamp.now()
         };
+        if($('s-help')){ payload.needsHelp = $('s-help').checked; payload.helpNote = $('s-help-note').value.trim(); }
         if($('s-comment')) payload.bossComment = $('s-comment').value.trim();
         await setDoc(doc(db,"slots",slotId), payload, {merge:true});
 
@@ -395,6 +440,41 @@
       }
     });
   }
+
+  // ── 이전 업무일지(지난 기록) ──
+  async function renderHistory(uid, containerId){
+    const box = $(containerId); if(!box) return;
+    box.innerHTML = '<div class="section-title">🗂 지난 기록 (최근순 · 최대 3개월)</div><div class="loading">불러오는 중...</div>';
+    const snap = await getDocs(query(collection(db,"daily"),where("uid","==",uid)));
+    const days = []; snap.forEach(d=>days.push(d.data()));
+    days.sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+    box.innerHTML = '<div class="section-title">🗂 지난 기록 (최근순 · 최대 3개월)</div>';
+    if(!days.length){ box.innerHTML += '<div class="empty-state">아직 기록이 없습니다</div>'; return; }
+    const listWrap = el('div','card');
+    days.forEach(d=>{
+      const goals=d.topGoals||[]; const gd=goals.filter(g=>g.done).length;
+      const row = el('div','tomorrow-row'); row.style.cursor='pointer'; row.style.justifyContent='space-between';
+      row.innerHTML = `<div><b style="color:#c8cad8">${d.date||''}</b> <span class="muted">🎯 ${gd}/${goals.length}${d.clockIn?' · 출근 '+d.clockIn:''}${(d.blocker||'').trim()?' · 🆘':''}</span></div><span class="muted">${d.selfFeedback?esc(d.selfFeedback.slice(0,28)):''} ▸</span>`;
+      row.onclick = ()=>openDayDetail(uid, d.date);
+      listWrap.appendChild(row);
+    });
+    box.appendChild(listWrap);
+    const detail = el('div'); detail.id='history-detail'; box.appendChild(detail);
+  }
+  window.openDayDetail = async (uid, date) => {
+    const box = $('history-detail'); if(!box) return;
+    box.innerHTML = '<div class="loading">불러오는 중...</div>';
+    const sn = await getDocs(query(collection(db,"slots"),where("uid","==",uid),where("date","==",date)));
+    const slots=[]; sn.forEach(x=>slots.push(x.data())); slots.sort((a,b)=>(a.hour||'').localeCompare(b.hour||''));
+    const dSnap = await getDoc(doc(db,"daily",`${uid}_${date}`)); const dd = dSnap.exists()?dSnap.data():{};
+    box.innerHTML = `<div class="card" style="margin-top:12px"><div class="card-title"><span class="dot" style="background:#5b8af0"></span> ${date} 상세</div>`+
+      (slots.length?slots.map(s=>`<div class="today-slot-row"><div class="slot-time">${s.hour}</div><div class="slot-body"><div class="slot-name">${esc(s.title||'')} <span style="color:${STATUS_COLOR[s.status]}">${STATUS_LABEL[s.status]||''}</span></div>${(s.links||[]).length?`<div style="margin-top:4px">${linkPills(s.links)}</div>`:''}</div></div>`).join(''):'<div class="empty-state">그날 시간별 업무 없음</div>')+
+      `<div class="card-title" style="margin-top:12px"><span class="dot" style="background:#22c55e"></span> 핵심목표</div><div class="feedback-box">${(dd.topGoals||[]).map(g=>`${g.done?'✅':'⬜'} ${esc(g.text)}`).join('<br>')||'(없음)'}</div>`+
+      `<div class="card-title" style="margin-top:12px"><span class="dot" style="background:#f59e0b"></span> 자체 피드백</div><div class="feedback-box">${esc(dd.selfFeedback)||'(없음)'}</div>`+
+      (dd.improve?`<div class="card-title" style="margin-top:12px"><span class="dot" style="background:#8fb0f0"></span> 배운 점/개선점</div><div class="feedback-box">${esc(dd.improve)}</div>`:'')+
+      `</div>`;
+  };
+  window.bossShowHistory = (uid) => renderHistory(uid, 'boss-history-wrap');
 
   // ── 오늘 상세 뷰
   function renderTodayDetail(uid, containerId) {
@@ -446,7 +526,9 @@
           </div>
           <div class="card">
             <div class="card-title"><span class="dot" style="background:#f59e0b"></span> 자체 피드백</div>
-            <textarea id="self-feedback" class="form-textarea" placeholder="오늘 이슈, 반성, 특이사항" style="height:90px"></textarea>
+            <textarea id="self-feedback" class="form-textarea" placeholder="오늘 이슈, 반성, 특이사항" style="height:80px"></textarea>
+            <div class="card-title" style="margin-top:16px"><span class="dot" style="background:#8fb0f0"></span> 배운 점 / 개선점 (회고)</div>
+            <textarea id="improve-input" class="form-textarea" placeholder="오늘 배운 점, 다음에 개선할 점" style="height:70px"></textarea>
             <div class="card-title" style="margin-top:16px"><span class="dot" style="background:#5b8af0"></span> 내일 업무 계획</div>
             <div id="tomorrow-slots"></div>
             <button class="btn btn-outline" style="width:100%;margin-top:8px" onclick="addTomorrowTask()">+ 내일 업무 추가</button>
@@ -496,8 +578,10 @@
       row.innerHTML = `
         <div class="slot-time">${s.hour}</div>
         <div class="slot-body">
-          <div class="slot-name">${s.title}</div>
+          <div class="slot-name">${s.title}${s.needsHelp?' <span style="color:#f59e0b;font-size:11px">🆘</span>':''}</div>
           ${s.memo?`<div class="slot-memo">${s.memo}</div>`:''}
+          ${s.needsHelp?`<div style="color:#f59e0b;font-size:11px;margin-top:2px">🆘 도움요청${s.helpNote?': '+esc(s.helpNote):''}</div>`:''}
+          ${(s.links||[]).length?`<div style="margin-top:4px">${linkPills(s.links)}</div>`:''}
           ${s.bossComment?`<div class="boss-comment-inline">👑 ${s.bossComment}</div>`:''}
         </div>
         <div class="slot-st" style="color:${STATUS_COLOR[s.status]}">${STATUS_LABEL[s.status]||''}</div>
@@ -513,7 +597,7 @@
       list.innerHTML = '<div class="card-title"><span class="dot" style="background:#22c55e"></span> 오늘 시간별 업무</div>';
       arr.forEach(s=>{
         const row=el('div','today-slot-row');
-        row.innerHTML=`<div class="slot-time">${s.hour}</div><div class="slot-body"><div class="slot-name">${s.title}</div>${s.memo?`<div class="slot-memo">${s.memo}</div>`:''} ${s.bossComment?`<div class="boss-comment-inline">👑 ${s.bossComment}</div>`:''}</div><div class="slot-st" style="color:${STATUS_COLOR[s.status]}">${STATUS_LABEL[s.status]||''}</div>`;
+        row.innerHTML=`<div class="slot-time">${s.hour}</div><div class="slot-body"><div class="slot-name">${s.title}${s.needsHelp?' <span style="color:#f59e0b;font-size:11px">🆘</span>':''}</div>${s.memo?`<div class="slot-memo">${s.memo}</div>`:''}${s.needsHelp?`<div style="color:#f59e0b;font-size:11px;margin-top:2px">🆘 도움요청${s.helpNote?': '+esc(s.helpNote):''}</div>`:''}${(s.links||[]).length?`<div style="margin-top:4px">${linkPills(s.links)}</div>`:''}${s.bossComment?`<div class="boss-comment-inline">👑 ${s.bossComment}</div>`:''}</div><div class="slot-st" style="color:${STATUS_COLOR[s.status]}">${STATUS_LABEL[s.status]||''}</div>`;
         list.appendChild(row);
       });
     });
@@ -524,6 +608,7 @@
     const snap = await getDoc(doc(db,"daily",`${uid}_${dateStr}`));
     const d = snap.exists() ? snap.data() : {};
     if($('self-feedback')) $('self-feedback').value = d.selfFeedback||'';
+    if($('improve-input')) $('improve-input').value = d.improve||'';
     if($('tomorrow-slots')) $('tomorrow-slots').innerHTML = ''; // 중복 방지
     if(d.tomorrowTasks) d.tomorrowTasks.forEach(t=>addTomorrowTask(t));
     if(d.topGoals && d.topGoals.length) renderGoalRows(d.topGoals);
@@ -557,6 +642,7 @@
     await setDoc(doc(db,"daily",`${uid}_${dateStr}`), {
       uid, date: dateStr,
       selfFeedback: feedback,
+      improve: $('improve-input')?.value.trim()||'',
       tomorrowTasks: tasks,
       updatedAt: Timestamp.now()
     }, {merge:true});
@@ -721,8 +807,10 @@
         <div style="display:flex;gap:8px">
           <button class="btn btn-outline" onclick="openAddTaskModal('${s.uid}','${s.displayName||s.email}')">📎 업무 배정</button>
           <button class="btn btn-primary" onclick="openBossCommentModal('${s.uid}','${s.displayName||s.email}')">💬 지시 보내기</button>
+          <button class="btn btn-outline" onclick="bossShowHistory('${s.uid}')">🗂 지난 기록</button>
         </div>
       </div>
+      <div id="boss-history-wrap"></div>
       <div id="boss-week-wrap"></div>
       <div class="two-col" style="margin-top:20px">
         <div id="boss-today-slots"></div>
@@ -759,8 +847,10 @@
         row.innerHTML = `
           <div class="slot-time">${sl.hour}</div>
           <div class="slot-body">
-            <div class="slot-name">${sl.title}</div>
+            <div class="slot-name">${sl.title}${sl.needsHelp?' <span style="color:#f59e0b;font-size:11px">🆘</span>':''}</div>
             ${sl.memo?`<div class="slot-memo">${sl.memo}</div>`:''}
+            ${sl.needsHelp?`<div style="color:#f59e0b;font-size:11px;margin-top:2px">🆘 도움요청${sl.helpNote?': '+esc(sl.helpNote):''}</div>`:''}
+            ${(sl.links||[]).length?`<div style="margin-top:4px">${linkPills(sl.links)}</div>`:''}
           </div>
           <div class="slot-st" style="color:${STATUS_COLOR[sl.status]}">${STATUS_LABEL[sl.status]||''}</div>
           <div style="display:flex;gap:4px;margin-left:8px">
@@ -784,6 +874,7 @@
           ${(dData.blocker||'').trim()?`<div class="card-title" style="margin-top:16px"><span class="dot" style="background:#ef4444"></span> 블로커 (도움요청)</div><div class="feedback-box" style="border-color:#4a2020;color:#ef8f8f">${dData.blocker}</div>`:''}
           <div class="card-title" style="margin-top:16px"><span class="dot" style="background:#f59e0b"></span> 자체 피드백</div>
           <div class="feedback-box">${dData.selfFeedback||'(아직 입력하지 않음)'}</div>
+          ${dData.improve?`<div class="card-title" style="margin-top:16px"><span class="dot" style="background:#8fb0f0"></span> 배운 점/개선점</div><div class="feedback-box">${esc(dData.improve)}</div>`:''}
           <div class="card-title" style="margin-top:16px"><span class="dot" style="background:#5b8af0"></span> 내일 업무 계획</div>
           <div class="feedback-box">${(dData.tomorrowTasks||[]).map((t,i)=>`${i+1}. ${t}`).join('<br>')||'(아직 입력하지 않음)'}</div>
           <div class="card-title" style="margin-top:16px"><span class="dot" style="background:#7ab040"></span> 관리자 코멘트 달기</div>
@@ -878,11 +969,12 @@
     `;
     const grid = $('team-grid');
     const blockers = [];
+    const helps = [];
     for(const s of staffList) {
       const q = query(collection(db,"slots"),where("uid","==",s.uid),where("date","==",dateStr));
       const sn = await getDocs(q);
-      let done=0,wip=0,undone=0;
-      sn.forEach(d=>{ const st=d.data().status; if(st==='done')done++; else if(st==='wip')wip++; else undone++; });
+      let done=0,wip=0,undone=0,helpN=0;
+      sn.forEach(d=>{ const sd=d.data(); const st=sd.status; if(st==='done')done++; else if(st==='wip')wip++; else undone++; if(sd.needsHelp){ helpN++; helps.push({name:s.displayName||s.email, title:sd.title||''}); } });
       const total = done+wip+undone;
       const pct = total>0?Math.round(done/total*100):0;
       const pc = pct>=80?'#22c55e':pct>=50?'#f59e0b':'#ef4444';
@@ -925,9 +1017,12 @@
       grid.appendChild(card);
     }
     const bwrap = $('team-banner');
-    if(bwrap && blockers.length){
+    const items = [];
+    blockers.forEach(b=>items.push(`${b.name} (${b.text})`));
+    helps.forEach(h=>items.push(`${h.name} — ${h.title}`));
+    if(bwrap && items.length){
       bwrap.innerHTML = `<div style="background:#221012;border:1px solid #5a2626;border-radius:12px;padding:12px 16px;margin-bottom:16px;font-size:13px;color:#f0b8b8">`+
-        `<b style="color:#ef4444">🚨 도움요청 ${blockers.length}건</b> · ${blockers.map(b=>`${b.name} (${b.text})`).join(' · ')}</div>`;
+        `<b style="color:#ef4444">🆘 도움요청 ${items.length}건</b> · ${items.map(esc).join(' · ')}</div>`;
     }
   }
 
