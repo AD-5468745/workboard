@@ -188,11 +188,20 @@
   // ──────────────────────────────────────────
   // 화면 전환
   // ──────────────────────────────────────────
+  // 화면 잔재 제거(계정 전환 시 직원이 관리자 화면을 보는 문제 방지)
+  function resetAppUI() {
+    unsubListeners.forEach(u=>{ try{u();}catch(e){} }); unsubListeners = [];
+    selectedStaffUid = null;
+    if($('sidebar')) $('sidebar').innerHTML = '';
+    if($('main-content')) $('main-content').innerHTML = '';
+  }
   function showLogin() {
+    resetAppUI();
     $('login-screen').style.display = 'flex';
     $('app-screen').style.display   = 'none';
   }
   function showApp() {
+    resetAppUI();
     $('login-screen').style.display = 'none';
     $('app-screen').style.display   = 'flex';
     $('user-name-badge').textContent = userProfile.displayName || currentUser.email;
@@ -206,6 +215,7 @@
   // ── 직원 뷰
   // ──────────────────────────────────────────
   function renderStaffView(uid) {
+    if($('sidebar')) $('sidebar').style.display = 'none'; // 직원은 직원목록 사이드바 없음
     $('main-content').innerHTML = '';
     const wrap = el('div','staff-wrap');
     wrap.innerHTML = `
@@ -648,6 +658,7 @@
   // ── 상사 뷰
   // ──────────────────────────────────────────
   async function renderBossView() {
+    if($('sidebar')) $('sidebar').style.display = ''; // 관리자만 직원목록 사이드바
     const main = $('main-content');
     main.innerHTML = '<div class="loading">직원 목록 불러오는 중...</div>';
 
