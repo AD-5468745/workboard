@@ -348,7 +348,8 @@
         <div class="modal-title">📌 슬롯 편집 — ${date} ${hour}</div>
         <div class="form-group">
           <label>업무 내용</label>
-          <input id="s-title" class="form-input" placeholder="업무 내용을 입력하세요" value="${d.title||''}">
+          <input id="s-title" class="form-input" list="title-suggest" placeholder="업무 내용 (최근 업무 자동완성)" value="${d.title||''}">
+          <datalist id="title-suggest"></datalist>
         </div>
         <div class="form-group">
           <label>상태</label>
@@ -391,6 +392,12 @@
       // 링크 행 채우기(없으면 빈 행 1개)
       (d.links||[]).forEach(l=>addLinkRow(l.label,l.url));
       if(!(d.links&&d.links.length)) addLinkRow();
+
+      // 자주 쓰는 업무 자동완성(최근 업무 제안)
+      getDocs(query(collection(db,"slots"),where("uid","==",uid))).then(sn=>{
+        const titles=new Set(); sn.forEach(x=>{ const tt=(x.data().title||'').trim(); if(tt) titles.add(tt); });
+        const dl=$('title-suggest'); if(dl) dl.innerHTML=[...titles].slice(0,25).map(x=>`<option value="${esc(x)}"></option>`).join('');
+      }).catch(()=>{});
 
       // 관리자: 도움요청 해결
       if($('slot-resolve')) $('slot-resolve').onclick = async () => {
@@ -483,12 +490,15 @@
     const ws = (userProfile && userProfile.workStart) || DEFAULT_START;
     const we = (userProfile && userProfile.workEnd) || DEFAULT_END;
     wrap.innerHTML = `
-      <div class="section-title">📋 오늘 상세 — ${dateStr}</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin:2px 0 12px">
+        <div class="section-title" style="margin:0">📋 오늘 — ${dateStr}</div>
+        <span id="save-status" style="font-size:12px;color:#6b7090">✍️ 입력하면 자동 저장돼요</span>
+      </div>
       <div id="today-status"></div>
 
-      <div class="card" style="border-color:#3a3f6b;margin-bottom:16px">
+      <div class="card" style="border-color:#3a3f6b;margin-bottom:14px">
         <div class="card-title"><span class="dot" style="background:#5b8af0"></span> 오늘 업무 — 그냥 쭉 쓰기 (자동 정리)</div>
-        <textarea id="brain-dump" class="form-textarea" placeholder="예) 오전에 견적서 3건 발송, 10시 회의, 오후 신규페이지 초안 진행하다 디자인권한 없어서 막힘, 내일 주간보고 정리 예정" style="height:70px"></textarea>
+        <textarea id="brain-dump" class="form-textarea" placeholder="예) 오전에 견적서 3건 발송, 10시 회의, 오후 신규페이지 초안 진행하다 디자인권한 없어서 막힘, 내일 주간보고 정리 예정" style="height:66px"></textarea>
         <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
           <span class="page-sub">쉼표·키워드(완료/막힘/예정)·시간을 넣으면 잘 정리돼요</span>
           <button class="btn btn-primary" style="margin-left:auto" onclick="doAutoOrganize('${uid}')">✨ 자동 정리</button>
@@ -496,47 +506,43 @@
         <div id="organize-preview"></div>
       </div>
 
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-title"><span class="dot" style="background:#5b8af0"></span> 근태 · 근무시간</div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <input id="work-start" type="time" class="form-input" style="width:118px" value="${ws}">
+          <span class="page-sub">~</span>
+          <input id="work-end" type="time" class="form-input" style="width:118px" value="${we}">
+          <button class="btn btn-outline" onclick="saveWorkHours('${uid}')">시간 저장</button>
+          <span style="width:1px;height:22px;background:#252836;margin:0 6px"></span>
+          <button class="btn btn-primary" onclick="doClock('${uid}','in')">🟢 출근</button>
+          <button class="btn btn-outline" onclick="doClock('${uid}','out')">🔴 퇴근</button>
+          <span id="clock-status" class="page-sub"></span>
+        </div>
+      </div>
+
       <div class="two-col">
         <div>
-          <div class="card" style="margin-bottom:16px">
-            <div class="card-title"><span class="dot" style="background:#5b8af0"></span> 내 근무시간 · 출퇴근</div>
-            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-              <input id="work-start" type="time" class="form-input" style="width:120px" value="${ws}">
-              <span class="page-sub">~</span>
-              <input id="work-end" type="time" class="form-input" style="width:120px" value="${we}">
-              <button class="btn btn-outline" onclick="saveWorkHours('${uid}')">시간 저장</button>
-            </div>
-            <div style="display:flex;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap">
-              <button class="btn btn-primary" onclick="doClock('${uid}','in')">🟢 출근</button>
-              <button class="btn btn-outline" onclick="doClock('${uid}','out')">🔴 퇴근</button>
-              <span id="clock-status" class="page-sub"></span>
-            </div>
-          </div>
-          <div id="today-slots-list"></div>
-        </div>
-        <div>
-          <div class="card" style="margin-bottom:16px">
+          <div class="card" style="margin-bottom:14px">
             <div class="card-title"><span class="dot" style="background:#22c55e"></span> 오늘의 핵심목표 Top 3</div>
             <div id="goals-list"></div>
-            <button class="btn btn-primary" style="width:100%;margin-top:8px" onclick="saveGoals('${uid}')">목표 저장</button>
+            <div id="carryover"></div>
           </div>
-          <div class="card" style="margin-bottom:16px;border-color:#4a2020">
-            <div class="card-title"><span class="dot" style="background:#ef4444"></span> 이슈 · 블로커 (막히면 사장에게 표시)</div>
-            <textarea id="blocker-input" class="form-textarea" placeholder="지금 막힌 것이 있으면 적어주세요 (없으면 비워두기)" style="height:60px"></textarea>
-            <button class="btn btn-outline" style="width:100%;margin-top:8px" onclick="saveBlocker('${uid}')">블로커 저장</button>
+          <div class="card" style="border-color:#4a2020">
+            <div class="card-title"><span class="dot" style="background:#ef4444"></span> 이슈 · 블로커 <span class="page-sub" style="font-weight:400">· 막히면 사장에게 표시</span></div>
+            <textarea id="blocker-input" class="form-textarea" placeholder="지금 막힌 것이 있으면 적어주세요 (없으면 비워두기)" style="height:56px" oninput="scheduleDailySave()"></textarea>
           </div>
-          <div class="card">
+        </div>
+        <div>
+          <div class="card" style="margin-bottom:14px">
             <div class="card-title"><span class="dot" style="background:#f59e0b"></span> 자체 피드백</div>
-            <textarea id="self-feedback" class="form-textarea" placeholder="오늘 이슈, 반성, 특이사항" style="height:80px"></textarea>
-            <div class="card-title" style="margin-top:16px"><span class="dot" style="background:#8fb0f0"></span> 배운 점 / 개선점 (회고)</div>
-            <textarea id="improve-input" class="form-textarea" placeholder="오늘 배운 점, 다음에 개선할 점" style="height:70px"></textarea>
-            <div class="card-title" style="margin-top:16px"><span class="dot" style="background:#5b8af0"></span> 내일 업무 계획</div>
+            <textarea id="self-feedback" class="form-textarea" placeholder="오늘 이슈, 반성, 특이사항" style="height:70px" oninput="scheduleDailySave()"></textarea>
+            <div class="card-title" style="margin-top:14px"><span class="dot" style="background:#8fb0f0"></span> 배운 점 / 개선점 (회고)</div>
+            <textarea id="improve-input" class="form-textarea" placeholder="오늘 배운 점, 다음에 개선할 점" style="height:60px" oninput="scheduleDailySave()"></textarea>
+            <div class="card-title" style="margin-top:14px"><span class="dot" style="background:#5b8af0"></span> 내일 업무 계획</div>
             <div id="tomorrow-slots"></div>
             <button class="btn btn-outline" style="width:100%;margin-top:8px" onclick="addTomorrowTask()">+ 내일 업무 추가</button>
-            <div style="margin-top:16px;text-align:right">
-              <button class="btn btn-primary" onclick="saveDailyReport('${uid}')">💾 저장 및 보고</button>
-            </div>
           </div>
+          <div id="today-slots-list"></div>
         </div>
       </div>
     `;
@@ -546,16 +552,46 @@
     renderTodayStatus(uid, dateStr);
   }
 
+  // ── 자동저장 (버튼 없이 입력하면 바로 저장) ──
+  let _saveTimer = null;
+  function showSaveStatus(txt, color){ const el=$('save-status'); if(el){ el.textContent=txt; el.style.color=color||'#6b7090'; } }
+  window.scheduleDailySave = () => {
+    if(!currentUser) return;
+    showSaveStatus('저장 중…', '#f59e0b');
+    clearTimeout(_saveTimer);
+    _saveTimer = setTimeout(doDailySave, 1000);
+  };
+  async function doDailySave(){
+    if(!currentUser) return;
+    const uid = currentUser.uid, dateStr = today();
+    const goals = [...document.querySelectorAll('.goal-text')].map((t,i)=>({ text:t.value.trim(), done:document.querySelectorAll('.goal-check')[i]?.checked||false })).filter(g=>g.text);
+    const tasks = [...document.querySelectorAll('.tomorrow-task')].map(i=>i.value.trim()).filter(Boolean);
+    try {
+      await setDoc(doc(db,"daily",`${uid}_${dateStr}`), {
+        uid, date:dateStr,
+        selfFeedback: $('self-feedback')?.value.trim()||'',
+        improve: $('improve-input')?.value.trim()||'',
+        topGoals: goals,
+        blocker: $('blocker-input')?.value.trim()||'',
+        tomorrowTasks: tasks,
+        updatedAt: Timestamp.now()
+      }, {merge:true});
+      showSaveStatus('저장됨 ✓', '#22c55e');
+    } catch(e){ showSaveStatus('저장 실패 — 잠시 후 다시', '#ef4444'); }
+  }
+
   // 일지 완성도 + 어제 개선점 리마인드
   async function renderTodayStatus(uid, dateStr){
     const box = $('today-status'); if(!box) return;
     const y = new Date(dateStr); y.setDate(y.getDate()-1); const yStr = y.toISOString().slice(0,10);
-    const [ySnap, tSnap, slotSnap] = await Promise.all([
+    const [ySnap, tSnap, slotSnap, slotYSnap] = await Promise.all([
       getDoc(doc(db,"daily",`${uid}_${yStr}`)),
       getDoc(doc(db,"daily",`${uid}_${dateStr}`)),
-      getDocs(query(collection(db,"slots"),where("uid","==",uid),where("date","==",dateStr)))
+      getDocs(query(collection(db,"slots"),where("uid","==",uid),where("date","==",dateStr))),
+      getDocs(query(collection(db,"slots"),where("uid","==",uid),where("date","==",yStr)))
     ]);
-    const yImprove = ySnap.exists()?(ySnap.data().improve||'').trim():'';
+    const yData = ySnap.exists()?ySnap.data():{};
+    const yImprove = (yData.improve||'').trim();
     const t = tSnap.exists()?tSnap.data():{};
     const goals = (t.topGoals||[]).filter(g=>(g.text||'').trim()).length;
     const has = { '출근':!!t.clockIn, '시간표':slotSnap.size>0, '목표':goals>0, '회고':!!((t.selfFeedback||'').trim()||(t.improve||'').trim()) };
@@ -566,6 +602,22 @@
     if(yImprove) html += `<div style="background:#141c2e;border:1px solid #26406b;border-radius:8px;padding:8px 12px;font-size:12px;color:#8fb0f0;margin-bottom:8px">💡 어제 개선점: ${esc(yImprove)}</div>`;
     html += `<div style="background:#161922;border:1px solid #252836;border-radius:8px;padding:8px 12px;font-size:12px;margin-bottom:8px"><b style="color:${color}">오늘 일지 완성도 ${pct}%</b> · ${keys.map(k=>`${has[k]?'✅':'⬜'} ${k}`).join(' · ')}${missing.length?` <span style="color:#f59e0b">— ${missing.join(', ')} 비었어요</span>`:' 👍'}</div>`;
     box.innerHTML = html;
+
+    // 자동 이월: 어제 '내일 계획' → 오늘 목표 (오늘 목표가 완전히 비었을 때만)
+    const goalInputs = [...document.querySelectorAll('.goal-text')];
+    const goalsEmptyDom = goalInputs.length>0 && goalInputs.every(i=>!i.value.trim());
+    const yTomorrow = (yData.tomorrowTasks||[]).filter(s=>(s||'').trim());
+    if(goalsEmptyDom && goals===0 && yTomorrow.length){
+      renderGoalRows(yTomorrow.slice(0,3).map(x=>({text:x,done:false})));
+      showSaveStatus('어제 계획을 오늘 목표로 가져왔어요 ✓','#8fb0f0');
+      scheduleDailySave();
+    }
+    // 어제 못 끝낸 일 리마인더
+    const cbox = $('carryover');
+    if(cbox){
+      const undone=[]; slotYSnap.forEach(d=>{ const s=d.data(); if(s.title && s.status!=='done') undone.push(s.title); });
+      cbox.innerHTML = undone.length ? `<div style="margin-top:8px;background:#141c2e;border:1px solid #26406b;border-radius:8px;padding:8px 10px;font-size:12px;color:#8fb0f0">↪️ 어제 못 끝낸 일 ${undone.length}개: ${undone.slice(0,4).map(esc).join(', ')}</div>` : '';
+    }
   }
 
   // 핵심목표 3줄 렌더 (체크 + 텍스트)
@@ -576,8 +628,8 @@
       const g = goals[i] || {text:'',done:false};
       const row = el('div','tomorrow-row');
       row.innerHTML =
-        `<input type="checkbox" class="goal-check" ${g.done?'checked':''} style="width:18px;height:18px;flex-shrink:0">`+
-        `<input class="form-input goal-text" placeholder="핵심목표 ${i+1}" value="${(g.text||'').replace(/"/g,'&quot;')}">`;
+        `<input type="checkbox" class="goal-check" ${g.done?'checked':''} onchange="scheduleDailySave()" style="width:18px;height:18px;flex-shrink:0">`+
+        `<input class="form-input goal-text" placeholder="핵심목표 ${i+1}" value="${(g.text||'').replace(/"/g,'&quot;')}" oninput="scheduleDailySave()">`;
       box.appendChild(row);
     }
   }
@@ -655,7 +707,7 @@
     const wrap = $('tomorrow-slots');
     if(!wrap) return;
     const row = el('div','tomorrow-row');
-    row.innerHTML = `<input class="form-input tomorrow-task" placeholder="내일 할 일" value="${val}"><button onclick="this.parentElement.remove()">✕</button>`;
+    row.innerHTML = `<input class="form-input tomorrow-task" placeholder="내일 할 일" value="${(val||'').replace(/"/g,'&quot;')}" oninput="scheduleDailySave()"><button onclick="this.parentElement.remove();scheduleDailySave()">✕</button>`;
     wrap.appendChild(row);
   };
 
