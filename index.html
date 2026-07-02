@@ -11,7 +11,7 @@
   import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged }
     from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
   import { getFirestore, doc, setDoc, getDoc, collection, query, where,
-    getDocs, onSnapshot, orderBy, Timestamp, deleteDoc }
+    getDocs, onSnapshot, orderBy, Timestamp, deleteDoc, addDoc }
     from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
   // ──────────────────────────────────────────
@@ -495,6 +495,7 @@
         <span id="save-status" style="font-size:12px;color:#6b7090">✍️ 입력하면 자동 저장돼요</span>
       </div>
       <div id="today-status"></div>
+      <div id="routines-box" style="margin-bottom:14px"></div>
 
       <div class="card" style="border-color:#3a3f6b;margin-bottom:14px">
         <div class="card-title"><span class="dot" style="background:#5b8af0"></span> 오늘 업무 — 그냥 쭉 쓰기 (자동 정리)</div>
@@ -550,6 +551,7 @@
     loadTodaySlots(uid, dateStr);
     loadDailyReport(uid, dateStr);
     renderTodayStatus(uid, dateStr);
+    loadRoutinesChecklist(uid, 'routines-box', dateStr);
   }
 
   // ── 자동저장 (버튼 없이 입력하면 바로 저장) ──
@@ -579,6 +581,95 @@
       showSaveStatus('저장됨 ✓', '#22c55e');
     } catch(e){ showSaveStatus('저장 실패 — 잠시 후 다시', '#ef4444'); }
   }
+
+  // ── 필수 업무(루틴) + 단계별 가이드 ──
+  window.toggleGuide = (id) => { const g=$(id); if(g) g.style.display = g.style.display==='none' ? 'block':'none'; };
+
+  async function loadRoutinesChecklist(uid, containerId, dateStr){
+    const box = $(containerId); if(!box) return;
+    const canManage = (currentUser && currentUser.uid===uid) || userRole==='boss';
+    const [rSnap, dSnap] = await Promise.all([
+      getDocs(collection(db,"routines")),
+      getDoc(doc(db,"daily",`${uid}_${dateStr}`))
+    ]);
+    const routines = [];
+    rSnap.forEach(r=>{ const d=r.data(); if(d.active!==false && (d.targetUid==='all' || d.targetUid===uid)) routines.push({id:r.id, ...d}); });
+    routines.sort((a,b)=>(a.title||'').localeCompare(b.title||''));
+    const done = new Set(((dSnap.exists()?dSnap.data().routinesDone:[])||[]));
+    const manageLink = canManage ? `<span class="page-sub" style="cursor:pointer;color:#5b8af0" onclick="openRoutineManager('${uid}')">관리</span>` : '';
+    if(!routines.length){
+      box.innerHTML = `<div class="card"><div class="card-title" style="justify-content:space-between"><span><span class="dot" style="background:#22c55e"></span> ✅ 오늘의 필수 업무</span>${manageLink}</div><div class="page-sub">아직 등록된 필수 업무가 없어요.</div></div>`;
+      return;
+    }
+    const doneN = routines.filter(r=>done.has(r.id)).length;
+    let html = `<div class="card" style="border-color:#204d36"><div class="card-title" style="justify-content:space-between"><span><span class="dot" style="background:#22c55e"></span> ✅ 오늘의 필수 업무 <span class="page-sub" style="font-weight:400">· ${doneN}/${routines.length} 완료 · 매일 리셋</span></span>${manageLink}</div>`;
+    routines.forEach(r=>{
+      const on = done.has(r.id);
+      const gid = 'g_'+r.id;
+      html += `<div style="display:flex;align-items:flex-start;gap:10px;padding:9px 0;border-bottom:1px solid #1a1d28">
+        <span onclick="toggleRoutineDone('${uid}','${r.id}')" style="width:20px;height:20px;border-radius:6px;border:1.5px solid ${on?'#204d36':'#3a3f52'};background:${on?'#123021':'transparent'};color:#22c55e;display:inline-flex;align-items:center;justify-content:center;font-size:13px;cursor:pointer;flex-shrink:0">${on?'✓':''}</span>
+        <div style="flex:1">
+          <div style="display:flex;justify-content:space-between;gap:8px;align-items:center">
+            <span style="font-size:13px;font-weight:600;color:${on?'#5f6473':'#c8cad8'};${on?'text-decoration:line-through':''}">${esc(r.title)}${r.targetUid!=='all'?' <span class="page-sub" style="font-weight:400">· 개인</span>':''}</span>
+            ${(r.guide||'').trim()?`<span class="page-sub" style="cursor:pointer;color:#8fb0f0;white-space:nowrap" onclick="toggleGuide('${gid}')">📖 방법</span>`:''}
+          </div>
+          ${(r.guide||'').trim()?`<div id="${gid}" style="display:none;margin-top:6px;background:#101725;border:1px solid #26406b;border-radius:8px;padding:8px 10px;font-size:12px;color:#a9c2e8;line-height:1.7;white-space:pre-wrap">${esc(r.guide)}</div>`:''}
+        </div>
+      </div>`;
+    });
+    html += `</div>`;
+    box.innerHTML = html;
+  }
+
+  window.toggleRoutineDone = async (uid, rid) => {
+    const dateStr = today();
+    const ref = doc(db,"daily",`${uid}_${dateStr}`);
+    const snap = await getDoc(ref);
+    const cur = new Set(((snap.exists()?snap.data().routinesDone:[])||[]));
+    if(cur.has(rid)) cur.delete(rid); else cur.add(rid);
+    await setDoc(ref, { uid, date:dateStr, routinesDone:[...cur], updatedAt:Timestamp.now() }, {merge:true});
+    loadRoutinesChecklist(uid, 'routines-box', dateStr);
+  };
+
+  window.openRoutineManager = async (uid) => {
+    const boss = userRole==='boss';
+    const rSnap = await getDocs(collection(db,"routines"));
+    const list = []; rSnap.forEach(r=>{ const d=r.data(); if(boss || d.createdBy===currentUser.uid) list.push({id:r.id, ...d}); });
+    list.sort((a,b)=>(a.title||'').localeCompare(b.title||''));
+    let staffList = []; let targetOpts = `<option value="${boss?'all':currentUser.uid}">${boss?'전 직원 공통':'나만'}</option>`;
+    if(boss){
+      const us = await getDocs(query(collection(db,"users"),where("role","==","staff")));
+      us.forEach(u=>staffList.push({uid:u.id, name:u.data().displayName||u.id}));
+      targetOpts += staffList.map(s=>`<option value="${s.uid}">${esc(s.name)}만</option>`).join('');
+    }
+    const nameOf = (t)=> t==='all'?'전체' : (staffList.find(s=>s.uid===t)?.name || (t===currentUser.uid?'나':'개인'));
+    showModal(`
+      <div class="modal-title">🧩 필수 업무 관리</div>
+      <div class="form-group"><label>제목</label><input id="rt-title" class="form-input" placeholder="예: 오픈 점검"></div>
+      ${boss?`<div class="form-group"><label>대상</label><select id="rt-target" class="form-input">${targetOpts}</select></div>`:`<input type="hidden" id="rt-target" value="${currentUser.uid}">`}
+      <div class="form-group"><label>작업 절차 (SOP) — 단계별 방법 (선택)</label><textarea id="rt-guide" class="form-textarea" style="height:100px" placeholder="1. ...&#10;2. ...&#10;3. ..."></textarea></div>
+      <div style="text-align:right"><button class="btn btn-primary" onclick="saveRoutine('${uid}')">＋ 추가</button></div>
+      <div style="border-top:1px solid #252836;margin-top:14px;padding-top:12px">
+        <div class="page-sub" style="margin-bottom:6px">등록된 필수 업무 (${list.length})</div>
+        ${list.length? list.map(r=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #1a1d28"><span style="font-size:13px;color:#c8cad8">${esc(r.title)} <span class="page-sub">· ${esc(nameOf(r.targetUid))}</span></span><button class="btn btn-danger" onclick="deleteRoutine('${r.id}','${uid}')">삭제</button></div>`).join('') : '<div class="page-sub">아직 없음</div>'}
+      </div>
+      <div class="modal-footer"><button class="btn btn-outline" onclick="closeModal()">닫기</button></div>
+    `);
+  };
+  window.saveRoutine = async (uid) => {
+    const title = $('rt-title')?.value.trim(); if(!title){ alert('제목을 입력하세요'); return; }
+    const tgt = (userRole==='boss') ? ($('rt-target')?.value||'all') : currentUser.uid;
+    const guide = $('rt-guide')?.value.trim()||'';
+    await addDoc(collection(db,"routines"), { title, guide, targetUid:tgt, createdBy:currentUser.uid, active:true, createdAt:Timestamp.now() });
+    openRoutineManager(uid);
+    loadRoutinesChecklist(uid, 'routines-box', today());
+  };
+  window.deleteRoutine = async (rid, uid) => {
+    if(!confirm('이 필수 업무를 삭제할까요?')) return;
+    await deleteDoc(doc(db,"routines",rid));
+    openRoutineManager(uid);
+    loadRoutinesChecklist(uid, 'routines-box', today());
+  };
 
   // 일지 완성도 + 어제 개선점 리마인드
   async function renderTodayStatus(uid, dateStr){
@@ -882,6 +973,7 @@
         </div>
         <div style="display:flex;gap:8px">
           <button class="btn btn-outline" onclick="openAddTaskModal('${s.uid}','${s.displayName||s.email}')">📎 업무 배정</button>
+          <button class="btn btn-outline" onclick="openRoutineManager('${s.uid}')">🧩 필수 업무</button>
           <button class="btn btn-primary" onclick="openBossCommentModal('${s.uid}','${s.displayName||s.email}')">💬 지시 보내기</button>
           <button class="btn btn-outline" onclick="bossShowHistory('${s.uid}')">🗂 지난 기록</button>
         </div>
@@ -910,8 +1002,16 @@
     const md = metaSnap.exists()?metaSnap.data():{};
     const mli = lateInfo(md.clockIn, s.workStart);
     const att = md.clockIn ? `출근 ${md.clockIn}${mli.late?` · 지각 ${mli.mins}분`:' · 정상'}${md.clockOut?` · 퇴근 ${md.clockOut}`:''}` : '미출근';
+    // 필수업무 완료 현황
+    let rtTxt = '';
+    try {
+      const rSnap = await getDocs(collection(db,"routines"));
+      let rTot=0; const doneSet=new Set(md.routinesDone||[]); let rDone=0;
+      rSnap.forEach(r=>{ const d=r.data(); if(d.active!==false && (d.targetUid==='all'||d.targetUid===s.uid)){ rTot++; if(doneSet.has(r.id)) rDone++; } });
+      if(rTot>0) rtTxt = ` · 필수업무 ${rDone}/${rTot}`;
+    } catch(e){}
     const meta = $('staff-meta');
-    if(meta) meta.textContent = `오늘 완료 ${done}/${total}건 · ${att}`;
+    if(meta) meta.textContent = `오늘 완료 ${done}/${total}건${rtTxt} · ${att}`;
 
     // 슬롯 목록
     const slotsWrap = $('boss-today-slots');
