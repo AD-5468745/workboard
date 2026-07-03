@@ -38,7 +38,7 @@
     const arr=[]; for(let h=s;h<e;h++) arr.push(String(h).padStart(2,"0")+":00"); return arr;
   };
   const HOURS = hoursRange();
-  const DAYS  = ["월","화","수","목","금"];
+  const DAYS  = ["월","화","수","목","금","토","일"];
   const STATUS_LABEL = { done:"완료", wip:"진행중", todo:"미완", skip:"미완" };
   const SVAR = { done:"var(--success)", wip:"var(--warn)", todo:"var(--text-3)", skip:"var(--text-3)" };
   const toMin = t => { const m=/^(\d{1,2}):(\d{2})/.exec(t||""); return m?(+m[1])*60+(+m[2]):null; };
@@ -523,7 +523,7 @@
     hdr.innerHTML='<div class="time-col-hdr"></div>'+DAYS.map((d,i)=>{const date=new Date(ws);date.setDate(date.getDate()+i);const ds=date.toISOString().slice(0,10);const isT=ds===today();return `<div class="day-hdr${isT?' today':''}">${d}<br><span class="day-date">${date.getMonth()+1}/${date.getDate()}</span></div>`;}).join('');
     grid.appendChild(hdr);
     for(const hour of HRS){ const row=el('div','week-row'); row.innerHTML=`<div class="time-col">${hour}</div>`;
-      for(let i=0;i<5;i++){ const date=new Date(ws);date.setDate(date.getDate()+i);const ds=date.toISOString().slice(0,10);const isT=ds===today();const cell=el('div','week-cell'+(isT?' today-col':'')); cell.dataset.date=ds; cell.dataset.hour=hour; cell.dataset.uid=uid; cell.addEventListener('click',()=>openSlotModal(uid,ds,hour,cell)); row.appendChild(cell); }
+      for(let i=0;i<7;i++){ const date=new Date(ws);date.setDate(date.getDate()+i);const ds=date.toISOString().slice(0,10);const isT=ds===today();const cell=el('div','week-cell'+(isT?' today-col':'')); cell.dataset.date=ds; cell.dataset.hour=hour; cell.dataset.uid=uid; cell.addEventListener('click',()=>openSlotModal(uid,ds,hour,cell)); row.appendChild(cell); }
       grid.appendChild(row); }
     wrap.appendChild(grid);
     const q=query(collection(db,"slots"),where("uid","==",uid),where("weekStart","==",ws));
@@ -888,12 +888,12 @@ body{font-family:-apple-system,'Malgun Gothic','맑은 고딕',sans-serif;backgr
 
 /* 주간 그리드 */
 .week-grid{background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:20px;}
-.week-header-row{display:grid;grid-template-columns:56px repeat(5,1fr);border-bottom:1px solid var(--border);}
+.week-header-row{display:grid;grid-template-columns:48px repeat(7,1fr);border-bottom:1px solid var(--border);}
 .time-col-hdr{padding:8px;}
 .day-hdr{padding:8px 6px;text-align:center;font-size:12px;font-weight:700;color:var(--text-2);border-left:1px solid var(--border);line-height:1.4;}
 .day-hdr.today{color:var(--accent);background:var(--accent-bg);}
 .day-date{font-size:10px;font-weight:400;color:var(--text-3);}
-.week-row{display:grid;grid-template-columns:56px repeat(5,1fr);border-bottom:1px solid var(--border);}
+.week-row{display:grid;grid-template-columns:48px repeat(7,1fr);border-bottom:1px solid var(--border);}
 .week-row:last-child{border-bottom:none;}
 .time-col{padding:8px;font-size:11px;color:var(--text-3);display:flex;align-items:center;}
 .week-cell{border-left:1px solid var(--border);min-height:50px;padding:4px;cursor:pointer;transition:background .1s;}
