@@ -210,9 +210,9 @@
       </div>
       <div id="miss-check" style="margin-top:14px"></div>
     `;
-    await runCarryover(uid, dateStr);
-    await loadTodayTasks(uid, dateStr);
-    await loadDailyReport(uid, dateStr);
+    try { await runCarryover(uid, dateStr); } catch(e){ console.error('[WB] runCarryover 실패', e); }
+    try { await loadTodayTasks(uid, dateStr); } catch(e){ console.error('[WB] loadTodayTasks 실패', e); }
+    try { await loadDailyReport(uid, dateStr); } catch(e){ console.error('[WB] loadDailyReport 실패', e); }
     loadRoutinesChecklist(uid,'routines-box',dateStr);
     refreshMode(uid, dateStr);
   }
@@ -358,6 +358,7 @@
   }
   async function loadDailyReport(uid, dateStr){
     const snap=await getDoc(doc(db,"daily",`${uid}_${dateStr}`)); const d=snap.exists()?snap.data():{};
+    console.log('[WB] loadDailyReport 실행됨', dateStr, 'improve=', (d.improve||'').slice(0,10), 'el=', !!$('improve-input'));
     if($('self-feedback')) $('self-feedback').value=d.selfFeedback||'';
     if($('improve-input')) $('improve-input').value=d.improve||'';
     if($('blocker-input')) $('blocker-input').value=d.blocker||'';
