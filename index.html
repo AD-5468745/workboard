@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- WorkBoard build 2026-07-03c (topics + subtasks + boss category mgr) -->
+<!-- WorkBoard build 2026-07-03d (routines by topic + multi-add) -->
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
@@ -561,19 +561,29 @@
     const canManage=(currentUser&&currentUser.uid===uid)||userRole==='boss';
     const [rSnap,dSnap]=await Promise.all([getDocs(collection(db,"routines")),getDoc(doc(db,"daily",`${uid}_${dateStr}`))]);
     const routines=[]; rSnap.forEach(r=>{const d=r.data(); if(d.active!==false&&(d.targetUid==='all'||d.targetUid===uid)) routines.push({id:r.id,...d});});
-    routines.sort((a,b)=>(a.title||'').localeCompare(b.title||''));
     const done=new Set(((dSnap.exists()?dSnap.data().routinesDone:[])||[]));
     const manage=canManage?`<span class="link-btn" onclick="openRoutineManager('${uid}')">관리</span>`:'';
     if(!routines.length){ box.innerHTML=`<div class="soft-card"><div class="row-between"><span class="sec-title">필수 업무</span>${manage}</div><div class="muted" style="margin-top:6px">아직 등록된 필수 업무가 없어요.</div></div>`; return; }
     const doneN=routines.filter(r=>done.has(r.id)).length;
-    let html=`<div class="soft-card"><div class="row-between"><span class="sec-title">필수 업무 <span class="muted">· ${doneN}/${routines.length} · 매일 리셋</span></span>${manage}</div>`;
-    routines.forEach(r=>{ const on=done.has(r.id); const gid='g_'+r.id;
-      html+=`<div class="rt-row">
+    const cm=catMapOf();
+    const groups=new Map();
+    routines.forEach(r=>{ const cid=(r.category&&cm[r.category])?r.category:'__none__'; if(!groups.has(cid))groups.set(cid,[]); groups.get(cid).push(r); });
+    const ord=categories.filter(c=>groups.has(c.id)).map(c=>c.id); if(groups.has('__none__'))ord.push('__none__');
+    const grouped = ord.length>1 || (ord.length===1 && ord[0]!=='__none__');
+    const rowH=(r)=>{ const on=done.has(r.id); const gid='g_'+r.id;
+      return `<div class="rt-row">
         <span class="rt-check ${on?'on':''}" onclick="toggleRoutineDone('${uid}','${r.id}')">${on?'✓':''}</span>
         <div style="flex:1">
           <div class="row-between"><span class="rt-title ${on?'done':''}">${esc(r.title)}${r.targetUid!=='all'?' <span class="muted">· 개인</span>':''}</span>${(r.guide||'').trim()?`<span class="link-btn" onclick="toggleGuide('${gid}')">방법 ▾</span>`:''}</div>
           ${(r.guide||'').trim()?`<div id="${gid}" class="rt-guide" style="display:none">${esc(r.guide)}</div>`:''}
         </div></div>`;
+    };
+    let html=`<div class="soft-card"><div class="row-between"><span class="sec-title">필수 업무 <span class="muted">· ${doneN}/${routines.length} · 매일 리셋</span></span>${manage}</div>`;
+    ord.forEach(cid=>{
+      const cat=cid==='__none__'?{name:'기타',color:'#cbd2dc'}:cm[cid];
+      const rs=groups.get(cid).slice().sort((a,b)=>(a.title||'').localeCompare(b.title||''));
+      if(grouped){ const d=rs.filter(r=>done.has(r.id)).length; html+=`<div class="group-head static" style="padding:8px 4px 5px;margin-top:4px"><span class="grp-dot" style="background:${cat.color||'#cbd2dc'}"></span><span class="grp-name" style="font-size:12.5px">${esc(cat.name)}</span><span class="grp-count">${d}/${rs.length}</span></div>`; }
+      rs.forEach(r=>html+=rowH(r));
     });
     box.innerHTML=html+`</div>`;
   }
@@ -584,28 +594,32 @@
     loadRoutinesChecklist(uid,'routines-box',dateStr);
   };
   window.openRoutineManager = async (uid) => {
+    await loadCategories();
     const boss=userRole==='boss'; const rSnap=await getDocs(collection(db,"routines"));
     const list=[]; rSnap.forEach(r=>{const d=r.data(); if(boss||d.createdBy===currentUser.uid) list.push({id:r.id,...d});});
     list.sort((a,b)=>(a.title||'').localeCompare(b.title||''));
     let staffList=[], targetOpts=`<option value="${boss?'all':currentUser.uid}">${boss?'전 직원 공통':'나만'}</option>`;
     if(boss){ const us=await getDocs(query(collection(db,"users"),where("role","==","staff"))); us.forEach(u=>staffList.push({uid:u.id,name:u.data().displayName||u.id})); targetOpts+=staffList.map(s=>`<option value="${s.uid}">${esc(s.name)}만</option>`).join(''); }
     const nameOf=(t)=>t==='all'?'전체':(staffList.find(s=>s.uid===t)?.name||(t===currentUser.uid?'나':'개인'));
+    const cm=catMapOf(); const catName=(cid)=> (cid&&cm[cid])?cm[cid].name:'기타'; const catColor=(cid)=>(cid&&cm[cid])?cm[cid].color:'#cbd2dc';
     showModal(`
       <div class="modal-title">필수 업무 관리</div>
-      <div class="form-group"><label>제목</label><input id="rt-title" class="mini-input" style="width:100%" placeholder="예: 오픈 점검"></div>
+      <div class="muted" style="margin-bottom:12px;line-height:1.6">💡 <b>여러 개</b>를 등록할 수 있어요. 하나 넣고 "＋추가" → 또 넣고 "＋추가"를 반복하면 아래 목록에 쌓입니다. 주제를 달면 오늘 화면에서 <b>주제별로 묶여</b> 보여요.</div>
+      <div class="form-group"><label>제목 (하나의 필수 업무)</label><input id="rt-title" class="mini-input" style="width:100%" placeholder="예: 전일 이용회원 검수"></div>
+      <div class="form-group"><label>주제 (선택)</label><div class="row" style="gap:6px"><select id="rt-cat" class="mini-input" style="flex:1">${catOptions('')}</select><button type="button" class="btn btn-ghost" onclick="newCatInline('rt-cat')">＋ 새 주제</button></div></div>
       ${boss?`<div class="form-group"><label>대상</label><select id="rt-target" class="mini-input" style="width:100%">${targetOpts}</select></div>`:`<input type="hidden" id="rt-target" value="${currentUser.uid}">`}
-      <div class="form-group"><label>작업 절차 (SOP) — 단계별 방법 (선택)</label><textarea id="rt-guide" class="ta" style="height:90px" placeholder="1. ...&#10;2. ...&#10;3. ..."></textarea></div>
+      <div class="form-group"><label>작업 절차 (SOP) — 단계별 방법 (선택)</label><textarea id="rt-guide" class="ta" style="height:76px" placeholder="1. ...&#10;2. ..."></textarea></div>
       <div style="text-align:right"><button class="btn btn-primary" onclick="saveRoutine('${uid}')">＋ 추가</button></div>
       <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:12px">
         <div class="muted" style="margin-bottom:6px">등록됨 (${list.length})</div>
-        ${list.length?list.map(r=>`<div class="row-between" style="padding:6px 0;border-bottom:1px solid var(--border)"><span>${esc(r.title)} <span class="muted">· ${esc(nameOf(r.targetUid))}</span></span><button class="btn btn-danger" onclick="deleteRoutine('${r.id}','${uid}')">삭제</button></div>`).join(''):'<div class="muted">아직 없음</div>'}
+        ${list.length?list.map(r=>`<div class="row-between" style="padding:6px 0;border-bottom:1px solid var(--border)"><span><span class="grp-dot" style="background:${catColor(r.category)}"></span> ${esc(r.title)} <span class="muted">· ${esc(catName(r.category))} · ${esc(nameOf(r.targetUid))}</span></span><button class="btn btn-danger" onclick="deleteRoutine('${r.id}','${uid}')">삭제</button></div>`).join(''):'<div class="muted">아직 없음</div>'}
       </div>
       <div class="modal-footer"><button class="btn btn-ghost" onclick="closeModal()">닫기</button></div>`);
   };
   window.saveRoutine = async (uid) => {
     const title=$('rt-title')?.value.trim(); if(!title){ alert('제목을 입력하세요'); return; }
-    const tgt=(userRole==='boss')?($('rt-target')?.value||'all'):currentUser.uid; const guide=$('rt-guide')?.value.trim()||'';
-    await addDoc(collection(db,"routines"),{title,guide,targetUid:tgt,createdBy:currentUser.uid,active:true,createdAt:Timestamp.now()});
+    const tgt=(userRole==='boss')?($('rt-target')?.value||'all'):currentUser.uid; const guide=$('rt-guide')?.value.trim()||''; const category=$('rt-cat')?.value||'';
+    await addDoc(collection(db,"routines"),{title,guide,category,targetUid:tgt,createdBy:currentUser.uid,active:true,createdAt:Timestamp.now()});
     openRoutineManager(uid); if($('routines-box')) loadRoutinesChecklist(uid,'routines-box',today());
   };
   window.deleteRoutine = async (rid, uid) => { if(!confirm('삭제할까요?')) return; await deleteDoc(doc(db,"routines",rid)); openRoutineManager(uid); if($('routines-box')) loadRoutinesChecklist(uid,'routines-box',today()); };
