@@ -210,9 +210,11 @@
       </div>
       <div id="miss-check" style="margin-top:14px"></div>
     `;
-    try { await runCarryover(uid, dateStr); } catch(e){ console.error('[WB] runCarryover 실패', e); }
-    try { await loadTodayTasks(uid, dateStr); } catch(e){ console.error('[WB] loadTodayTasks 실패', e); }
-    try { await loadDailyReport(uid, dateStr); } catch(e){ console.error('[WB] loadDailyReport 실패', e); }
+    // 순서 고정: ① 하루 마무리 값 먼저 불러오기(동시 daily 쓰기와 경합 방지) → ② 이월 → ③ 오늘 할 일
+    // 각 단계는 독립 실행(한 단계가 실패해도 나머지는 진행).
+    try { await loadDailyReport(uid, dateStr); } catch(e){ console.error('[WB] loadDailyReport', e); }
+    try { await runCarryover(uid, dateStr); } catch(e){ console.error('[WB] runCarryover', e); }
+    try { await loadTodayTasks(uid, dateStr); } catch(e){ console.error('[WB] loadTodayTasks', e); }
     loadRoutinesChecklist(uid,'routines-box',dateStr);
     refreshMode(uid, dateStr);
   }
@@ -358,7 +360,6 @@
   }
   async function loadDailyReport(uid, dateStr){
     const snap=await getDoc(doc(db,"daily",`${uid}_${dateStr}`)); const d=snap.exists()?snap.data():{};
-    console.log('[WB] loadDailyReport 실행됨', dateStr, 'improve=', (d.improve||'').slice(0,10), 'el=', !!$('improve-input'));
     if($('self-feedback')) $('self-feedback').value=d.selfFeedback||'';
     if($('improve-input')) $('improve-input').value=d.improve||'';
     if($('blocker-input')) $('blocker-input').value=d.blocker||'';
