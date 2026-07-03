@@ -76,6 +76,10 @@
   // ── 상태 ──
   let currentUser=null, userRole=null, userProfile=null, selectedStaffUid=null, unsubListeners=[];
   let todayTasks=[]; // 오늘 슬롯 캐시(직원 오늘 화면)
+  let categories=[]; // 주제(카테고리) 목록 캐시
+  const collapsedCats=new Set(); // 접힌 주제 그룹
+  const expandedSubs=new Set();  // 하위 단계 펼친 항목
+  const CAT_COLORS=['#4f6bed','#8b5cf6','#0ea5a4','#d97706','#e0567f','#16a34a','#0284c7','#64748b'];
 
   // ── 유틸 ──
   const today = () => new Date().toISOString().slice(0,10);
@@ -172,7 +176,7 @@
 
       <div id="routines-box" style="margin-bottom:16px"></div>
 
-      <div class="sec-head"><span class="sec-title">오늘 할 일</span><span id="save-status" class="muted">입력하면 자동 저장돼요</span></div>
+      <div class="sec-head"><span class="sec-title">오늘 할 일 <span class="muted" style="font-weight:400">· 주제별</span></span><span><span class="link-btn" onclick="openCategoryManager('${uid}')" style="margin-right:12px">주제 관리</span><span id="save-status" class="muted">입력하면 자동 저장돼요</span></span></div>
       <div id="task-list"></div>
       <div class="add-row">
         <i class="add-plus">＋</i>
@@ -235,15 +239,27 @@
     for(const s of undone){
       if(todayTitles.includes((s.title||'').trim())) continue;
       const id=`${uid}_${dateStr}_${newKey()}`;
-      writes.push(setDoc(doc(db,"slots",id),{ uid, date:dateStr, title:s.title, status:'todo', important:!!s.important, plannedTime:s.plannedTime||s.hour||'', links:s.links||[], carriedFrom:src, weekStart:weekStart(new Date(dateStr)), updatedAt:Timestamp.now() }));
+      writes.push(setDoc(doc(db,"slots",id),{ uid, date:dateStr, title:s.title, status:'todo', important:!!s.important, category:s.category||'', subtasks:(s.subtasks||[]).map(x=>({text:x.text,done:!!x.done})), plannedTime:s.plannedTime||s.hour||'', links:s.links||[], carriedFrom:src, weekStart:weekStart(new Date(dateStr)), updatedAt:Timestamp.now() }));
     }
     writes.push(setDoc(dref,{uid,date:dateStr,carryDone:src,updatedAt:Timestamp.now()},{merge:true}));
     await Promise.all(writes);
   }
 
+  // ── 주제(카테고리) ──
+  async function loadCategories(){
+    const s=await getDocs(collection(db,"categories")); categories=[];
+    s.forEach(d=>categories.push({id:d.id, ...d.data()}));
+    categories.sort((a,b)=>(a.order||0)-(b.order||0) || (a.createdAt?.seconds||0)-(b.createdAt?.seconds||0));
+  }
+  const catMapOf = () => { const m={}; categories.forEach(c=>m[c.id]=c); return m; };
+  const catOptions = (sel) => '<option value="">미분류</option>'+categories.map(c=>`<option value="${c.id}" ${c.id===sel?'selected':''}>${esc(c.name)}</option>`).join('');
+
   // ── 오늘 할 일 로드/렌더 ──
   async function loadTodayTasks(uid, dateStr){
-    const snap=await getDocs(query(collection(db,"slots"),where("uid","==",uid),where("date","==",dateStr)));
+    const [snap] = await Promise.all([
+      getDocs(query(collection(db,"slots"),where("uid","==",uid),where("date","==",dateStr))),
+      loadCategories()
+    ]);
     todayTasks=[]; snap.forEach(d=>todayTasks.push({id:d.id, ...d.data()}));
     renderTaskList(uid);
     syncGoals(uid);
@@ -257,26 +273,50 @@
   function renderTaskList(uid){
     const box=$('task-list'); if(!box) return;
     if(!todayTasks.length){ box.innerHTML='<div class="empty">아직 오늘 할 일이 없어요. 아래에 한 줄 적어보세요.</div>'; updateMissCheck(); return; }
-    const arr=[...todayTasks].sort(sortTasks);
+    const cm=catMapOf();
+    const groups=new Map();
+    todayTasks.forEach(t=>{ const cid=(t.category && cm[t.category])?t.category:'__none__'; if(!groups.has(cid))groups.set(cid,[]); groups.get(cid).push(t); });
+    const orderedIds=categories.filter(c=>groups.has(c.id)).map(c=>c.id);
+    if(groups.has('__none__')) orderedIds.push('__none__');
     box.innerHTML='';
-    arr.forEach(t=>{
-      const st=t.status==='skip'?'todo':(t.status||'todo');
-      const carried=!!t.carriedFrom;
-      const row=el('div','task-row'+(t.important?' task-important':'')+(carried?' carry-item':'')+(st==='done'?' task-done':''));
-      const seg=(s,lbl,cls)=>`<button class="seg ${st===s?'on '+cls:''}" onclick="setTaskStatus('${uid}','${t.id}','${s}')">${lbl}</button>`;
-      row.innerHTML=`
-        <span class="star" onclick="toggleImportant('${uid}','${t.id}')" title="중요 표시">${t.important?'★':'☆'}</span>
-        <div class="task-main">
-          <div class="task-title">${esc(t.title)}${carried?' <span class="pill pill-carry">이월</span>':''}${t.needsHelp&&!t.helpResolved?' <span class="pill pill-help">도움요청</span>':''}</div>
-          ${(t.plannedTime||t.hour)?`<span class="task-meta">${t.plannedTime||t.hour}</span>`:''}
-          ${(t.links||[]).length?`<div class="task-links">${linkPills(t.links)}</div>`:''}
-          ${t.bossComment?`<div class="boss-inline">👑 ${esc(t.bossComment)}</div>`:''}
-        </div>
-        <div class="seg-group">${seg('done','완료','seg-done')}${seg('wip','진행','seg-wip')}${seg('todo','못함','seg-todo')}</div>
-        <span class="more" onclick="openTaskDetail('${uid}','${t.id}')" title="상세">⋯</span>`;
-      box.appendChild(row);
+    orderedIds.forEach(cid=>{
+      const cat = cid==='__none__' ? {id:'__none__',name:'미분류',color:'#cbd2dc'} : cm[cid];
+      const tasks=groups.get(cid).slice().sort(sortTasks);
+      const doneN=tasks.filter(t=>(t.status||'todo')==='done').length;
+      const collapsed=collapsedCats.has(cid);
+      const gh=el('div','group-head');
+      gh.innerHTML=`<i class="grp-caret">${collapsed?'▸':'▾'}</i><span class="grp-dot" style="background:${cat.color||'#cbd2dc'}"></span><span class="grp-name">${esc(cat.name)}</span><span class="grp-count">${doneN}/${tasks.length}</span>`;
+      gh.onclick=()=>{ collapsed?collapsedCats.delete(cid):collapsedCats.add(cid); renderTaskList(uid); };
+      box.appendChild(gh);
+      if(collapsed) return;
+      tasks.forEach(t=>box.appendChild(taskRow(uid,t)));
     });
     updateMissCheck();
+  }
+  function taskRow(uid,t){
+    const st=t.status==='skip'?'todo':(t.status||'todo');
+    const carried=!!t.carriedFrom;
+    const subs=t.subtasks||[]; const subDone=subs.filter(s=>s.done).length;
+    const expanded=expandedSubs.has(t.id);
+    const row=el('div','task-row'+(t.important?' task-important':'')+(carried?' carry-item':'')+(st==='done'?' task-done':''));
+    const seg=(s,lbl,cls)=>`<button class="seg ${st===s?'on '+cls:''}" onclick="setTaskStatus('${uid}','${t.id}','${s}')">${lbl}</button>`;
+    const subLine = subs.length?`<span class="subline" onclick="toggleSub('${uid}','${t.id}')">🗂 하위 ${subDone}/${subs.length} ${expanded?'▾':'▸'}</span>`:'';
+    let subBox='';
+    if(subs.length && expanded){
+      subBox=`<div class="subbox">${subs.map((s,i)=>`<div class="subrow"><span class="scheck ${s.done?'on':''}" onclick="toggleSubDone('${uid}','${t.id}',${i})">${s.done?'✓':''}</span><span class="${s.done?'sdone':''}" style="flex:1">${esc(s.text)}</span><span class="xsub" onclick="removeSub('${uid}','${t.id}',${i})">✕</span></div>`).join('')}<div class="subrow"><span style="width:16px"></span><input class="sub-inp" id="subin_${t.id}" placeholder="＋ 단계 추가 · Enter" onkeydown="if(event.key==='Enter')addSub('${uid}','${t.id}')"></div></div>`;
+    }
+    row.innerHTML=`
+      <span class="star" onclick="toggleImportant('${uid}','${t.id}')" title="중요 표시">${t.important?'★':'☆'}</span>
+      <div class="task-main">
+        <div class="task-title">${esc(t.title)}${carried?' <span class="pill pill-carry">이월</span>':''}${t.needsHelp&&!t.helpResolved?' <span class="pill pill-help">도움요청</span>':''}</div>
+        <div class="task-sub">${(t.plannedTime||t.hour)?`<span class="task-meta">${t.plannedTime||t.hour}</span>`:''}${subLine}</div>
+        ${(t.links||[]).length?`<div class="task-links">${linkPills(t.links)}</div>`:''}
+        ${t.bossComment?`<div class="boss-inline">👑 ${esc(t.bossComment)}</div>`:''}
+        ${subBox}
+      </div>
+      <div class="seg-group">${seg('done','완료','seg-done')}${seg('wip','진행','seg-wip')}${seg('todo','못함','seg-todo')}</div>
+      <span class="more" onclick="openTaskDetail('${uid}','${t.id}')" title="상세">⋯</span>`;
+    return row;
   }
 
   window.addTask = async (uid) => {
@@ -310,6 +350,50 @@
     updateMissCheck();
   }
 
+  // ── 하위 업무(세분화) ──
+  const saveSubs = (id, subs) => setDoc(doc(db,"slots",id),{subtasks:subs,updatedAt:Timestamp.now()},{merge:true});
+  window.toggleSub = (uid,id) => { expandedSubs.has(id)?expandedSubs.delete(id):expandedSubs.add(id); renderTaskList(uid); };
+  window.toggleSubDone = async (uid,id,i) => { const t=todayTasks.find(x=>x.id===id); if(!t||!t.subtasks) return; t.subtasks[i].done=!t.subtasks[i].done; renderTaskList(uid); saveSubs(id,t.subtasks); };
+  window.removeSub = async (uid,id,i) => { const t=todayTasks.find(x=>x.id===id); if(!t||!t.subtasks) return; t.subtasks.splice(i,1); renderTaskList(uid); saveSubs(id,t.subtasks); };
+  window.addSub = async (uid,id) => { const inp=$('subin_'+id); const v=(inp?.value||'').trim(); if(!v) return; const t=todayTasks.find(x=>x.id===id); if(!t) return; t.subtasks=t.subtasks||[]; t.subtasks.push({text:v,done:false}); expandedSubs.add(id); renderTaskList(uid); saveSubs(id,t.subtasks); const n=$('subin_'+id); if(n)n.focus(); };
+
+  // ── 주제 관리 ──
+  window.newCatInline = async (selId) => {
+    const name=(prompt('새 주제 이름을 입력하세요 (예: 영업, 개발, 고객응대)')||'').trim(); if(!name) return;
+    const color=CAT_COLORS[categories.length % CAT_COLORS.length];
+    const ref=await addDoc(collection(db,"categories"),{name,color,order:categories.length,createdBy:currentUser.uid,createdAt:Timestamp.now()});
+    await loadCategories(); const sel=$(selId); if(sel){ sel.innerHTML=catOptions(ref.id); sel.value=ref.id; }
+  };
+  window.openCategoryManager = async (uid) => {
+    await loadCategories();
+    const boss=userRole==='boss';
+    const rows = categories.map(c=>{ const mine=boss||c.createdBy===currentUser.uid;
+      return `<div class="row-between" style="padding:7px 0;border-bottom:1px solid var(--border)"><span><span class="grp-dot" style="background:${c.color||'#cbd2dc'}"></span> ${esc(c.name)}</span>${mine?`<button class="btn btn-danger" onclick="deleteCategory('${c.id}','${uid}')">삭제</button>`:'<span class="muted">다른 사람이 만듦</span>'}</div>`;
+    }).join('');
+    showModal(`
+      <div class="modal-title">주제 관리</div>
+      <div class="form-group"><label>새 주제</label>
+        <div class="row" style="gap:6px"><input id="cat-name" class="mini-input" style="flex:1" placeholder="주제 이름 (예: 영업)"><button class="btn btn-primary" onclick="saveCategory('${uid}')">＋ 추가</button></div>
+        <div class="muted" style="margin-top:6px">색상은 자동 지정돼요. 항목 상세(⋯)에서 각 할 일에 주제를 붙입니다.</div>
+      </div>
+      <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px">
+        <div class="muted" style="margin-bottom:6px">등록된 주제 (${categories.length})</div>
+        ${categories.length?rows:'<div class="muted">아직 없음</div>'}
+      </div>
+      <div class="modal-footer"><button class="btn btn-ghost" onclick="closeModal()">닫기</button></div>`);
+  };
+  window.saveCategory = async (uid) => {
+    const name=$('cat-name')?.value.trim(); if(!name){ alert('주제 이름을 입력하세요'); return; }
+    const color=CAT_COLORS[categories.length % CAT_COLORS.length];
+    await addDoc(collection(db,"categories"),{name,color,order:categories.length,createdBy:currentUser.uid,createdAt:Timestamp.now()});
+    await loadCategories(); openCategoryManager(uid); if($('task-list')) renderTaskList(uid);
+  };
+  window.deleteCategory = async (cid, uid) => {
+    if(!confirm('이 주제를 삭제할까요? (이 주제의 할 일은 미분류로 이동합니다)')) return;
+    await deleteDoc(doc(db,"categories",cid));
+    await loadCategories(); openCategoryManager(uid); if($('task-list')) renderTaskList(uid);
+  };
+
   // ── 링크/도움 ──
   const linkPills = (links) => (links||[]).filter(l=>isValidUrl(l.url)).map(l=>`<a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer" class="linkpill">🔗 ${esc(l.label||'링크')}</a>`).join('');
   window.addLinkRow = (label='', url='') => {
@@ -325,19 +409,30 @@
     showModal(`
       <div class="modal-title">항목 상세</div>
       <div class="form-group"><label>제목</label><input id="d-title" class="mini-input" style="width:100%" value="${esc(t.title)}"></div>
+      <div class="form-group"><label>주제</label><div class="row" style="gap:6px"><select id="d-cat" class="mini-input" style="flex:1">${catOptions(t.category||'')}</select><button type="button" class="btn btn-ghost" onclick="newCatInline('d-cat')">＋ 새 주제</button></div></div>
+      <div class="form-group"><label>하위 단계 (세분화)</label><div id="d-subs"></div><div class="row" style="gap:6px;margin-top:6px"><input id="d-subnew" class="mini-input" style="flex:1" placeholder="단계 입력 후 추가" onkeydown="if(event.key==='Enter'){event.preventDefault();modalAddSub();}"><button type="button" class="btn btn-ghost" onclick="modalAddSub()">＋ 단계</button></div></div>
       <div class="form-group"><label>예정 시간 (선택)</label><input id="d-time" type="time" class="mini-input" value="${t.plannedTime||t.hour||''}"></div>
       <div class="form-group"><label>메모 (선택)</label><textarea id="d-memo" class="ta">${esc(t.memo)}</textarea></div>
       <div class="form-group"><label>🔗 관련 링크</label><div id="s-links"></div><button type="button" class="btn btn-ghost" style="margin-top:6px" onclick="addLinkRow()">＋ 링크</button></div>
       <div class="form-group help-box"><label class="row" style="gap:6px;cursor:pointer"><input type="checkbox" id="d-help" ${t.needsHelp&&!t.helpResolved?'checked':''}> 🆘 이 업무 관리자에게 도움요청</label><input id="d-helpnote" class="mini-input" style="width:100%;margin-top:6px" placeholder="어디가 어려운지 한 줄 (선택)" value="${esc(t.helpNote)}"></div>
       <div class="modal-footer"><button class="btn btn-danger" onclick="deleteTask('${uid}','${id}')">삭제</button><button class="btn btn-ghost" onclick="closeModal()">취소</button><button class="btn btn-primary" onclick="saveTaskDetail('${uid}','${id}')">저장</button></div>
     `);
+    (t.subtasks||[]).forEach(s=>modalSubRow(s.text,s.done));
     (t.links||[]).forEach(l=>addLinkRow(l.label,l.url)); if(!(t.links&&t.links.length)) addLinkRow();
   };
+  window.modalSubRow = (text='',done=false) => {
+    const box=$('d-subs'); if(!box) return;
+    const row=el('div','link-edit');
+    row.innerHTML=`<input type="checkbox" class="sub-done" ${done?'checked':''} style="width:16px;height:16px"><input class="mini-input sub-text" style="flex:1" value="${esc(text)}"><button type="button" class="xbtn" onclick="this.parentElement.remove()">✕</button>`;
+    box.appendChild(row);
+  };
+  window.modalAddSub = () => { const v=$('d-subnew')?.value.trim(); if(!v) return; modalSubRow(v,false); $('d-subnew').value=''; $('d-subnew').focus(); };
   window.saveTaskDetail = async (uid, id) => {
     const t=todayTasks.find(x=>x.id===id); if(!t) return;
     const title=$('d-title').value.trim(); if(!title){ alert('제목을 입력하세요'); return; }
     const links=[...document.querySelectorAll('#s-links .link-edit')].map(r=>({label:r.querySelector('.link-label').value.trim(),url:r.querySelector('.link-url').value.trim()})).filter(l=>isValidUrl(l.url));
-    const payload={ title, plannedTime:$('d-time').value||'', memo:$('d-memo').value.trim(), links, needsHelp:$('d-help').checked, helpNote:$('d-helpnote').value.trim(), updatedAt:Timestamp.now() };
+    const subtasks=[...document.querySelectorAll('#d-subs .link-edit')].map(r=>({text:r.querySelector('.sub-text').value.trim(),done:r.querySelector('.sub-done').checked})).filter(s=>s.text);
+    const payload={ title, category:$('d-cat')?.value||'', subtasks, plannedTime:$('d-time').value||'', memo:$('d-memo').value.trim(), links, needsHelp:$('d-help').checked, helpNote:$('d-helpnote').value.trim(), updatedAt:Timestamp.now() };
     Object.assign(t,payload);
     await setDoc(doc(db,"slots",id), payload, {merge:true});
     renderTaskList(uid); closeModal();
@@ -644,14 +739,26 @@
     const att=md.clockIn?`출근 ${md.clockIn}${mli.late?` · 지각 ${mli.mins}분`:' · 정상'}${md.clockOut?` · 퇴근 ${md.clockOut}`:''}`:'미출근';
     let rtTxt=''; try{ const rSnap=await getDocs(collection(db,"routines")); let rTot=0,rDone=0; const ds=new Set(md.routinesDone||[]); rSnap.forEach(r=>{const d=r.data(); if(d.active!==false&&(d.targetUid==='all'||d.targetUid===s.uid)){rTot++; if(ds.has(r.id))rDone++;}}); if(rTot>0) rtTxt=` · 필수업무 ${rDone}/${rTot}`; }catch(e){}
     const meta=$('staff-meta'); if(meta) meta.textContent=`오늘 완료 ${done}/${total}${rtTxt} · ${att}`;
+    await loadCategories();
     const wrap=$('boss-today-slots');
-    if(wrap){ wrap.innerHTML='<div class="soft-card"><div class="sec-title">오늘 할 일</div>'+
-      (slots.length?slots.map(sl=>`<div class="task-row static ${sl.status==='done'?'task-done':''}">
+    if(wrap){
+      const cm=catMapOf(); const grp=new Map();
+      slots.forEach(sl=>{ const cid=(sl.category&&cm[sl.category])?sl.category:'__none__'; if(!grp.has(cid))grp.set(cid,[]); grp.get(cid).push(sl); });
+      const ord=categories.filter(c=>grp.has(c.id)).map(c=>c.id); if(grp.has('__none__'))ord.push('__none__');
+      const rowHtml = sl=>`<div class="task-row static ${sl.status==='done'?'task-done':''}">
         <span class="star">${sl.important?'★':''}</span>
-        <div class="task-main"><div class="task-title">${esc(sl.title)}${sl.carriedFrom?' <span class="pill pill-carry">이월</span>':''}${sl.needsHelp&&!sl.helpResolved?' <span class="pill pill-help">도움요청</span>':''}</div>${(sl.plannedTime||sl.hour)?`<span class="task-meta">${sl.plannedTime||sl.hour}</span>`:''}${sl.memo?`<div class="task-meta">${esc(sl.memo)}</div>`:''}${sl.helpNote&&sl.needsHelp?`<div class="help-note">🆘 ${esc(sl.helpNote)}</div>`:''}${(sl.links||[]).length?`<div class="task-links">${linkPills(sl.links)}</div>`:''}</div>
+        <div class="task-main"><div class="task-title">${esc(sl.title)}${sl.carriedFrom?' <span class="pill pill-carry">이월</span>':''}${sl.needsHelp&&!sl.helpResolved?' <span class="pill pill-help">도움요청</span>':''}</div><div class="task-sub">${(sl.plannedTime||sl.hour)?`<span class="task-meta">${sl.plannedTime||sl.hour}</span>`:''}${(sl.subtasks||[]).length?`<span class="task-meta">🗂 하위 ${sl.subtasks.filter(x=>x.done).length}/${sl.subtasks.length}</span>`:''}</div>${sl.memo?`<div class="task-meta">${esc(sl.memo)}</div>`:''}${sl.helpNote&&sl.needsHelp?`<div class="help-note">🆘 ${esc(sl.helpNote)}</div>`:''}${(sl.links||[]).length?`<div class="task-links">${linkPills(sl.links)}</div>`:''}</div>
         <span class="badge" style="color:${SVAR[sl.status]}">${STATUS_LABEL[sl.status]||''}</span>
         <div class="row" style="gap:4px;margin-left:6px"><button class="btn-sm btn-approve" onclick="approveSlot('${sl.id}',true)">승인</button><button class="btn-sm btn-return" onclick="approveSlot('${sl.id}',false)">반려</button></div>
-      </div>`).join(''):'<div class="empty">오늘 항목 없음</div>')+'</div>';
+      </div>`;
+      let inner='';
+      if(slots.length){
+        inner+='<div class="cat-summary">'+ord.map(cid=>{const cat=cid==='__none__'?{name:'미분류',color:'#cbd2dc'}:cm[cid];const ts=grp.get(cid);const d=ts.filter(x=>x.status==='done').length;return `<span class="cat-chip"><span class="grp-dot" style="background:${cat.color||'#cbd2dc'}"></span>${esc(cat.name)} ${d}/${ts.length}</span>`;}).join('')+'</div>';
+        ord.forEach(cid=>{ const cat=cid==='__none__'?{name:'미분류',color:'#cbd2dc'}:cm[cid]; const ts=grp.get(cid).slice().sort(sortTasks); const d=ts.filter(x=>x.status==='done').length;
+          inner+=`<div class="group-head static"><span class="grp-dot" style="background:${cat.color||'#cbd2dc'}"></span><span class="grp-name">${esc(cat.name)}</span><span class="grp-count">${d}/${ts.length}</span></div>`+ts.map(rowHtml).join('');
+        });
+      } else inner='<div class="empty">오늘 항목 없음</div>';
+      wrap.innerHTML='<div class="soft-card"><div class="sec-title">오늘 할 일 <span class="muted" style="font-weight:400">· 주제별</span></div>'+inner+'</div>';
     }
     const dData=(await getDoc(dailyRef)).data()||{};
     const fb=$('boss-feedback-wrap');
@@ -857,6 +964,26 @@ body{font-family:-apple-system,'Malgun Gothic','맑은 고딕',sans-serif;backgr
 .more{font-size:18px;color:var(--text-3);cursor:pointer;flex-shrink:0;padding:0 2px;line-height:1;}
 .more:hover{color:var(--text);}
 .badge{font-size:12px;font-weight:600;flex-shrink:0;}
+/* 주제 그룹 */
+.group-head{display:flex;align-items:center;gap:8px;padding:9px 4px;cursor:pointer;border-bottom:1px solid var(--border);margin-top:2px;}
+.group-head.static{cursor:default;}
+.grp-caret{font-style:normal;font-size:11px;color:var(--text-3);width:10px;}
+.grp-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;display:inline-block;}
+.grp-name{font-size:13.5px;font-weight:600;color:var(--text);}
+.grp-count{font-size:11.5px;color:var(--text-3);margin-left:auto;}
+.cat-summary{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;}
+.cat-chip{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;color:var(--text-2);background:var(--surface-2);border:1px solid var(--border);border-radius:20px;padding:3px 10px;}
+/* 하위 단계 */
+.task-sub{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:2px;}
+.subline{font-size:11.5px;color:var(--accent-text);cursor:pointer;font-weight:500;}
+.subbox{margin-top:7px;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;padding:7px 10px;}
+.subrow{display:flex;align-items:center;gap:8px;padding:3px 0;font-size:12.5px;color:var(--text);}
+.scheck{width:17px;height:17px;border-radius:5px;border:1.4px solid var(--border-strong);display:inline-flex;align-items:center;justify-content:center;font-size:11px;color:var(--success);cursor:pointer;flex-shrink:0;background:#fff;}
+.scheck.on{background:var(--success-bg);border-color:var(--success);}
+.sdone{color:var(--text-3);text-decoration:line-through;}
+.xsub{color:var(--text-3);cursor:pointer;font-size:12px;flex-shrink:0;}
+.xsub:hover{color:var(--danger);}
+.sub-inp{flex:1;border:none;background:transparent;outline:none;font-size:12.5px;color:var(--text);padding:2px 0;}
 
 .add-row{display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:6px 10px;margin-top:2px;}
 .add-plus{color:var(--text-3);font-style:normal;font-size:16px;}
