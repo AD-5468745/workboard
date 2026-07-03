@@ -14,9 +14,6 @@
     getDocs, onSnapshot, orderBy, Timestamp, deleteDoc, addDoc }
     from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
-  // ──────────────────────────────────────────
-  // 🔧 여기에 Firebase 프로젝트 설정을 붙여넣으세요
-  // ──────────────────────────────────────────
   const firebaseConfig = {
     apiKey:            "AIzaSyDi23uzT0iokcCqU8rURUwSRPikaFALaR4",
     authDomain:        "dailywork-6ceda.firebaseapp.com",
@@ -25,1371 +22,938 @@
     messagingSenderId: "542297301092",
     appId:             "1:542297301092:web:a266a4891a09159087ff71"
   };
-
   const app  = initializeApp(firebaseConfig);
   const auth = getAuth(app);
   const db   = getFirestore(app);
 
-  // ──────────────────────────────────────────
-  // 🔧 텔레그램 알림 — Cloudflare Worker 주소만 넣으세요
-  //    (봇 토큰/Chat ID는 Worker에만 보관 → 브라우저엔 비밀이 없음)
-  // ──────────────────────────────────────────
-  const TG_WORKER_URL = "https://workboard-telegram.내계정.workers.dev"; // ← 배포한 Worker 주소로 교체
+  // 텔레그램 — Cloudflare Worker 주소만 넣으면 동작(비었으면 조용히 skip)
+  const TG_WORKER_URL = "https://workboard-telegram.내계정.workers.dev";
 
-  // ──────────────────────────────────────────
-  // 상수
-  // ──────────────────────────────────────────
+  // ── 상수 ──
   const DEFAULT_START = "09:00", DEFAULT_END = "18:00";
-  // 근무시간(시작~종료)으로 시간 슬롯 배열 생성. 잘못된 값이면 기본 09~18.
   const hoursRange = (start=DEFAULT_START, end=DEFAULT_END) => {
-    let s = parseInt((start||"").slice(0,2), 10);
-    let e = parseInt((end||"").slice(0,2), 10);
-    if (isNaN(s) || isNaN(e) || s < 0 || e > 24 || e <= s) { s = 9; e = 18; }
-    const arr = [];
-    for (let h = s; h < e; h++) arr.push(String(h).padStart(2,"0") + ":00");
-    return arr;
+    let s = parseInt((start||"").slice(0,2),10), e = parseInt((end||"").slice(0,2),10);
+    if (isNaN(s)||isNaN(e)||s<0||e>24||e<=s){ s=9; e=18; }
+    const arr=[]; for(let h=s;h<e;h++) arr.push(String(h).padStart(2,"0")+":00"); return arr;
   };
-  const HOURS = hoursRange(); // 기본값(09~18). 실제 렌더는 각 사용자 근무시간 사용.
+  const HOURS = hoursRange();
   const DAYS  = ["월","화","수","목","금"];
-  const STATUS_LABEL = { done:"✅ 완료", wip:"⏳ 진행중", todo:"📋 예정", skip:"⛔ 불가" };
-  const STATUS_COLOR = { done:"#22c55e", wip:"#f59e0b", todo:"#6b7280", skip:"#ef4444" };
-  const BOSS_UID_KEY = "boss_uid"; // Firestore users/{uid}.role === 'boss'
-
-  // 시각 "HH:MM" → 분. 지각/조퇴 계산용.
-  const toMin = t => { const m=/^(\d{1,2}):(\d{2})/.exec(t||""); return m ? (+m[1])*60 + (+m[2]) : null; };
+  const STATUS_LABEL = { done:"완료", wip:"진행중", todo:"미완", skip:"미완" };
+  const SVAR = { done:"var(--success)", wip:"var(--warn)", todo:"var(--text-3)", skip:"var(--text-3)" };
+  const toMin = t => { const m=/^(\d{1,2}):(\d{2})/.exec(t||""); return m?(+m[1])*60+(+m[2]):null; };
   const nowHM = () => { const d=new Date(); return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"); };
-  // 지각 정보: 출근시각이 근무시작보다 늦으면 late.
   const lateInfo = (clockIn, workStart) => {
-    const ci = toMin(clockIn), ws = toMin(workStart||DEFAULT_START);
-    if (ci==null || ws==null) return { late:false, mins:0 };
-    return { late: ci > ws, mins: Math.max(0, ci - ws) };
+    const ci=toMin(clockIn), ws=toMin(workStart||DEFAULT_START);
+    if(ci==null||ws==null) return {late:false,mins:0};
+    return { late: ci>ws, mins: Math.max(0,ci-ws) };
   };
 
-  // ── 무료 규칙기반 자동정리 (AI 없이) ──
-  // 자유 문장 → {items:[{title,status,hour}], goals:[], blocker} 로 분류.
-  // 나중에 이 함수만 AI 호출로 교체 가능.
+  // 무료 규칙기반 자동정리
   function autoOrganize(text){
-    const out = { items: [], goals: [], blocker: "" };
-    if(!text || !text.trim()) return out;
-    // 문장 분리: 줄바꿈 · 쉼표(, · 、) · 세미콜론 · "그리고"
-    const segs = text.split(/[\n,;·、]| 그리고 /).map(s=>s.trim()).filter(Boolean);
+    const out={items:[],goals:[],blocker:""};
+    if(!text||!text.trim()) return out;
+    const segs=text.split(/[\n,;·、]| 그리고 /).map(s=>s.trim()).filter(Boolean);
     for(const seg of segs){
-      // 시간 추출: "09:00" / "9시" / "오후 2시"
-      let hour = null;
-      let m = /(\d{1,2}):(\d{2})/.exec(seg);
-      if(m) hour = String(+m[1]).padStart(2,"0")+":00";
-      else {
-        let h = /(오전|오후)?\s*(\d{1,2})\s*시/.exec(seg);
-        if(h){ let hh=+h[2]; if(h[1]==="오후"&&hh<12) hh+=12; if(h[1]==="오전"&&hh===12) hh=0; hour=String(hh).padStart(2,"0")+":00"; }
-      }
-      // 상태 키워드
-      let status = "todo";
-      if(/(막힘|막혔|막혀|대기|블로커|안됨|안 됨|권한\s*없|이슈|문제)/.test(seg)) status = "blocker";
-      else if(/(완료|했음|했고|끝냄|끝|발송|보냄|보냈|제출|처리함|done)/.test(seg)) status = "done";
-      else if(/(진행|하는 중|하다|작업 중|작업중|중임|wip)/.test(seg)) status = "wip";
-      else if(/(예정|할 것|할것|해야|내일|todo|계획)/.test(seg)) status = "todo";
-      const tomorrow = /내일/.test(seg);
-      // 제목: 키워드/시간 흔적을 살짝 정리
-      let title = seg.replace(/(\d{1,2}:\d{2})/,"").replace(/(오전|오후)?\s*\d{1,2}\s*시/,"").trim();
-      title = title.replace(/(했고|했음|하다가|하다|예정임|예정|막힘|막혔음)$/,"").trim();
-      if(!title) title = seg.trim();
-      if(status === "blocker"){ out.blocker = out.blocker ? out.blocker+" / "+title : title; }
-      else out.items.push({ title, status, hour, tomorrow });
+      let hour=null, m=/(\d{1,2}):(\d{2})/.exec(seg);
+      if(m) hour=String(+m[1]).padStart(2,"0")+":00";
+      else { let h=/(오전|오후)?\s*(\d{1,2})\s*시/.exec(seg); if(h){let hh=+h[2]; if(h[1]==="오후"&&hh<12)hh+=12; if(h[1]==="오전"&&hh===12)hh=0; hour=String(hh).padStart(2,"0")+":00";} }
+      let status="todo";
+      if(/(막힘|막혔|막혀|대기|블로커|안됨|안 됨|권한\s*없|이슈|문제)/.test(seg)) status="blocker";
+      else if(/(완료|했음|했고|끝냄|끝|발송|보냄|보냈|제출|처리함|done)/.test(seg)) status="done";
+      else if(/(진행|하는 중|하다|작업 중|작업중|중임|wip)/.test(seg)) status="wip";
+      else if(/(예정|할 것|할것|해야|내일|todo|계획)/.test(seg)) status="todo";
+      let title=seg.replace(/(\d{1,2}:\d{2})/,"").replace(/(오전|오후)?\s*\d{1,2}\s*시/,"").trim();
+      title=title.replace(/(했고|했음|하다가|하다|예정임|예정|막힘|막혔음)$/,"").trim();
+      if(!title) title=seg.trim();
+      if(status==="blocker") out.blocker = out.blocker ? out.blocker+" / "+title : title;
+      else out.items.push({title,status,hour});
     }
-    // 핵심목표 후보: 예정/내일 항목 상위 3개
-    out.goals = out.items.filter(i=>i.status==="todo").slice(0,3).map(i=>({text:i.title, done:false}));
+    out.goals=out.items.filter(i=>i.status==="todo").slice(0,3).map(i=>i.title);
     return out;
   }
 
-  // ──────────────────────────────────────────
-  // 상태
-  // ──────────────────────────────────────────
-  let currentUser = null;
-  let userRole    = null; // 'boss' | 'staff'
-  let userProfile = null;
-  let selectedStaffUid = null;
-  let unsubListeners   = [];
+  // ── 상태 ──
+  let currentUser=null, userRole=null, userProfile=null, selectedStaffUid=null, unsubListeners=[];
+  let todayTasks=[]; // 오늘 슬롯 캐시(직원 오늘 화면)
 
-  // ──────────────────────────────────────────
-  // 유틸
-  // ──────────────────────────────────────────
+  // ── 유틸 ──
   const today = () => new Date().toISOString().slice(0,10);
-  const weekStart = (d=new Date()) => {
-    const day = d.getDay() || 7;
-    const mon = new Date(d); mon.setDate(d.getDate()-(day-1));
-    return mon.toISOString().slice(0,10);
-  };
+  const weekStart = (d=new Date()) => { const day=d.getDay()||7; const mon=new Date(d); mon.setDate(d.getDate()-(day-1)); return mon.toISOString().slice(0,10); };
   const $ = id => document.getElementById(id);
   const el = (tag,cls,html='') => { const e=document.createElement(tag); if(cls)e.className=cls; if(html)e.innerHTML=html; return e; };
+  const esc = s => (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const isValidUrl = u => /^https?:\/\/\S+$/i.test((u||'').trim());
+  const newKey = () => Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+  const dateLabel = (ds) => { const d=new Date(ds+"T00:00:00"); const w=["일","월","화","수","목","금","토"][d.getDay()]; return `${d.getMonth()+1}월 ${d.getDate()}일 (${w})`; };
 
-  // 3개월 전 날짜 (자동 삭제 기준)
-  const cutoffDate = () => {
-    const d = new Date(); d.setMonth(d.getMonth()-3);
-    return d.toISOString().slice(0,10);
-  };
-
-  // ──────────────────────────────────────────
-  // 텔레그램 알림
-  // ──────────────────────────────────────────
-  async function sendTelegram(name, date, summary) {
-    // 토큰은 브라우저에 없음 — Cloudflare Worker가 대신 텔레그램으로 보냄.
-    const text = `📋 WorkBoard 업무 보고\n👤 ${name} — ${date}\n${summary}\n\n🔗 확인: ${location.href}`;
-    if(!TG_WORKER_URL || TG_WORKER_URL.includes("내계정")) return; // 주소 미설정 시 조용히 skip
-    try {
-      await fetch(TG_WORKER_URL, {
-        method:"POST",
-        headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ text })
-      });
-    } catch(e){ console.warn("텔레그램 전송 실패",e); }
+  // ── 텔레그램 ──
+  async function sendTelegram(name, date, summary){
+    const text=`📋 WorkBoard 업무 보고\n👤 ${name} — ${date}\n${summary}\n\n🔗 확인: ${location.href}`;
+    if(!TG_WORKER_URL||TG_WORKER_URL.includes("내계정")) return;
+    try{ await fetch(TG_WORKER_URL,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text})}); }catch(e){}
   }
 
-  // ──────────────────────────────────────────
-  // AUTH
-  // ──────────────────────────────────────────
+  // ── AUTH ──
   onAuthStateChanged(auth, async user => {
-    if (user) {
-      currentUser = user;
-      const snap = await getDoc(doc(db,"users",user.uid));
-      userProfile = snap.data() || {};
-      userRole = userProfile.role || 'staff';
-      showApp();
-    } else {
-      currentUser = null;
-      showLogin();
-    }
+    if(user){ currentUser=user; const snap=await getDoc(doc(db,"users",user.uid)); userProfile=snap.data()||{}; userRole=userProfile.role||'staff'; showApp(); }
+    else { currentUser=null; showLogin(); }
   });
-
   window.doLogin = async () => {
-    const id  = $('login-id').value.trim();
-    const pw  = $('login-pw').value;
-    const err = $('login-err');
-    err.textContent = '';
+    const id=$('login-id').value.trim(), pw=$('login-pw').value, err=$('login-err'); err.textContent='';
     if(!id||!pw){ err.textContent='아이디와 비밀번호를 입력하세요.'; return; }
-    try {
-      // 아이디 → 이메일 규칙: setup.js와 동일하게 "아이디@workboard.internal"
-      // (로그인 전에는 보안규칙상 Firestore를 못 읽으므로, 이메일을 직접 만든다)
-      const email = `${id}@workboard.internal`;
-      await signInWithEmailAndPassword(auth, email, pw);
-    } catch(e){
-      const code = (e && e.code) || '';
-      if(code.includes('invalid-credential') || code.includes('user-not-found') || code.includes('wrong-password')){
-        err.textContent = '아이디 또는 비밀번호가 올바르지 않습니다.';
-      } else if(code.includes('too-many-requests')){
-        err.textContent = '요청이 많습니다. 잠시 후 다시 시도하세요.';
-      } else {
-        err.textContent = '로그인 실패: ' + (e.message || code);
-      }
+    try { await signInWithEmailAndPassword(auth, `${id}@workboard.internal`, pw); }
+    catch(e){ const c=(e&&e.code)||'';
+      if(c.includes('invalid-credential')||c.includes('user-not-found')||c.includes('wrong-password')) err.textContent='아이디 또는 비밀번호가 올바르지 않습니다.';
+      else if(c.includes('too-many-requests')) err.textContent='요청이 많습니다. 잠시 후 다시 시도하세요.';
+      else err.textContent='로그인 실패: '+(e.message||c);
     }
   };
-
   window.doLogout = async () => { await signOut(auth); };
 
-  // ──────────────────────────────────────────
-  // 화면 전환
-  // ──────────────────────────────────────────
-  // 화면 잔재 제거(계정 전환 시 직원이 관리자 화면을 보는 문제 방지)
-  function resetAppUI() {
-    unsubListeners.forEach(u=>{ try{u();}catch(e){} }); unsubListeners = [];
-    selectedStaffUid = null;
-    if($('sidebar')) $('sidebar').innerHTML = '';
-    if($('main-content')) $('main-content').innerHTML = '';
-  }
-  function showLogin() {
+  // ── 화면 전환 ──
+  function resetAppUI(){ unsubListeners.forEach(u=>{try{u();}catch(e){}}); unsubListeners=[]; selectedStaffUid=null; todayTasks=[]; if($('sidebar'))$('sidebar').innerHTML=''; if($('main-content'))$('main-content').innerHTML=''; }
+  function showLogin(){ resetAppUI(); $('login-screen').style.display='flex'; $('app-screen').style.display='none'; }
+  function showApp(){
     resetAppUI();
-    $('login-screen').style.display = 'flex';
-    $('app-screen').style.display   = 'none';
-  }
-  function showApp() {
-    resetAppUI();
-    $('login-screen').style.display = 'none';
-    $('app-screen').style.display   = 'flex';
-    $('user-name-badge').textContent = userProfile.displayName || currentUser.email;
-    $('role-badge').textContent = userRole === 'boss' ? '👑 관리자' : '👤 직원';
-    $('role-badge').className = 'role-badge ' + (userRole==='boss'?'boss':'');
-    if(userRole === 'boss') renderBossView();
-    else renderStaffView(currentUser.uid);
+    $('login-screen').style.display='none'; $('app-screen').style.display='flex';
+    $('user-name-badge').textContent=userProfile.displayName||currentUser.email;
+    $('role-badge').textContent=userRole==='boss'?'관리자':'직원';
+    $('role-badge').className='role-badge '+(userRole==='boss'?'boss':'');
+    if(userRole==='boss') renderBossView(); else renderStaffView(currentUser.uid);
   }
 
-  // ──────────────────────────────────────────
-  // ── 직원 뷰
-  // ──────────────────────────────────────────
-  function renderStaffView(uid) {
-    if($('sidebar')) $('sidebar').style.display = 'none'; // 직원은 직원목록 사이드바 없음
-    $('main-content').innerHTML = '';
-    const wrap = el('div','staff-wrap');
-    wrap.innerHTML = `
+  // ══════════════════════════════════════
+  //  직원 뷰
+  // ══════════════════════════════════════
+  function renderStaffView(uid){
+    if($('sidebar')) $('sidebar').style.display='none';
+    const main=$('main-content'); main.innerHTML='';
+    const wrap=el('div','staff-wrap');
+    wrap.innerHTML=`
       <div class="page-header">
-        <div>
-          <div class="page-title">내 업무 현황</div>
-          <div class="page-sub">${today()} · 수시 저장됩니다</div>
-        </div>
-        <div style="display:flex;gap:8px">
-          <button class="btn btn-outline" onclick="switchTab('week')">📅 주간 계획</button>
-          <button class="btn btn-primary" onclick="switchTab('today')">📋 오늘 상세</button>
-          <button class="btn btn-outline" onclick="switchTab('history')">🗂 지난 기록</button>
+        <div><div class="page-title">내 업무</div><div class="page-sub">${dateLabel(today())}</div></div>
+        <div class="tabbar">
+          <button class="tabbtn active" id="tb-today" onclick="switchTab('today')">오늘</button>
+          <button class="tabbtn" id="tb-week" onclick="switchTab('week')">주간</button>
+          <button class="tabbtn" id="tb-history" onclick="switchTab('history')">지난 기록</button>
         </div>
       </div>
-      <div id="tab-week" class="tab-panel"></div>
-      <div id="tab-today" class="tab-panel" style="display:none"></div>
-      <div id="tab-history" class="tab-panel" style="display:none"></div>
-    `;
-    $('main-content').appendChild(wrap);
-    renderWeekTimetable(uid, 'tab-week', hoursRange(userProfile.workStart, userProfile.workEnd));
-    renderTodayDetail(uid, 'tab-today');
+      <div id="tab-today" class="tab-panel"></div>
+      <div id="tab-week" class="tab-panel" style="display:none"></div>
+      <div id="tab-history" class="tab-panel" style="display:none"></div>`;
+    main.appendChild(wrap);
+    renderTodayDetail(uid,'tab-today');
   }
-
   window.switchTab = (tab) => {
-    $('tab-week').style.display  = tab==='week'  ? '' : 'none';
-    $('tab-today').style.display = tab==='today' ? '' : 'none';
-    if($('tab-history')) $('tab-history').style.display = tab==='history' ? '' : 'none';
-    if(tab==='history' && currentUser) renderHistory(currentUser.uid, 'tab-history');
+    ['today','week','history'].forEach(t=>{ const p=$('tab-'+t); if(p)p.style.display=t===tab?'':'none'; const b=$('tb-'+t); if(b)b.classList.toggle('active',t===tab); });
+    if(tab==='week' && currentUser) renderWeekTimetable(currentUser.uid,'tab-week',hoursRange(userProfile.workStart,userProfile.workEnd));
+    if(tab==='history' && currentUser) renderHistory(currentUser.uid,'tab-history');
   };
 
-  // ── 주간 타임테이블 (직원)
-  async function renderWeekTimetable(uid, containerId, hoursArr) {
-    const HRS  = (hoursArr && hoursArr.length) ? hoursArr : HOURS;
-    const ws   = weekStart();
-    const wrap = $(containerId);
-    wrap.innerHTML = '<div class="section-title">📅 이번 주 타임테이블</div>';
+  // ── 오늘 화면(단일 흐름) ──
+  async function renderTodayDetail(uid, containerId){
+    const wrap=$(containerId); const dateStr=today();
+    const ws=(userProfile&&userProfile.workStart)||DEFAULT_START, we=(userProfile&&userProfile.workEnd)||DEFAULT_END;
+    wrap.innerHTML=`
+      <div id="mode-banner"></div>
 
-    const grid = el('div','week-grid');
-    // 헤더
-    const hdr = el('div','week-header-row');
-    hdr.innerHTML = '<div class="time-col-hdr"></div>' +
-      DAYS.map((d,i)=>{
-        const date = new Date(ws); date.setDate(date.getDate()+i);
-        const dateStr = date.toISOString().slice(0,10);
-        const isToday = dateStr === today();
-        return `<div class="day-hdr${isToday?' today':''}">${d}<br><span class="day-date">${date.getMonth()+1}/${date.getDate()}</span></div>`;
-      }).join('');
-    grid.appendChild(hdr);
-
-    // 시간 행
-    for(const hour of HRS) {
-      const row = el('div','week-row');
-      row.innerHTML = `<div class="time-col">${hour}</div>`;
-      for(let i=0;i<5;i++){
-        const date = new Date(ws); date.setDate(date.getDate()+i);
-        const dateStr = date.toISOString().slice(0,10);
-        const isToday = dateStr === today();
-        const cell = el('div','week-cell'+(isToday?' today-col':''));
-        cell.dataset.date = dateStr;
-        cell.dataset.hour = hour;
-        cell.dataset.uid  = uid;
-        cell.addEventListener('click', () => openSlotModal(uid, dateStr, hour, cell));
-        row.appendChild(cell);
-      }
-      grid.appendChild(row);
-    }
-    wrap.appendChild(grid);
-
-    // 데이터 로드
-    const q = query(
-      collection(db,"slots"),
-      where("uid","==",uid),
-      where("weekStart","==",ws)
-    );
-    const snap = await getDocs(q);
-    snap.forEach(d => {
-      const s = d.data();
-      const cell = wrap.querySelector(`[data-date="${s.date}"][data-hour="${s.hour}"]`);
-      if(cell) renderCellContent(cell, s);
-    });
-
-    // 실시간 구독
-    const unsub = onSnapshot(q, snap => {
-      snap.docChanges().forEach(ch => {
-        const s = ch.doc.data();
-        const cell = wrap.querySelector(`[data-date="${s.date}"][data-hour="${s.hour}"]`);
-        if(cell) renderCellContent(cell, ch.type==='removed'?null:s);
-      });
-    });
-    unsubListeners.push(unsub);
-  }
-
-  function renderCellContent(cell, s) {
-    cell.innerHTML = '';
-    if(!s||!s.title) { cell.classList.remove('has-data'); return; }
-    cell.classList.add('has-data');
-    const chip = el('div','slot-chip');
-    chip.style.borderLeftColor = STATUS_COLOR[s.status]||'#6b7280';
-    const badge = (s.needsHelp?` <span style="color:#f59e0b;font-size:10px">🆘</span>`:'') + ((s.links||[]).length?` <span style="color:#8fb0f0;font-size:10px">🔗${s.links.length}</span>`:'');
-    chip.innerHTML = `<div class="slot-title">${s.title}${badge}</div><div class="slot-status" style="color:${STATUS_COLOR[s.status]}">${STATUS_LABEL[s.status]||''}</div>`;
-    cell.appendChild(chip);
-  }
-
-  // ── 링크/도움요청 헬퍼 ──
-  const isValidUrl = u => /^https?:\/\/\S+$/i.test((u||'').trim());
-  const esc = s => (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-  window.addLinkRow = (label='', url='') => {
-    const box = $('s-links'); if(!box) return;
-    const row = el('div','tomorrow-row');
-    row.innerHTML = `<input class="form-input link-label" placeholder="이름(예: 시트)" style="width:120px" value="${esc(label)}">`+
-      `<input class="form-input link-url" placeholder="https://..." value="${esc(url)}">`+
-      `<button type="button" onclick="this.parentElement.remove()" style="background:transparent;border:none;color:#4a4e63;cursor:pointer">✕</button>`;
-    box.appendChild(row);
-  };
-  // 링크칩(클릭 새 탭)
-  const linkPills = (links) => (links||[]).filter(l=>isValidUrl(l.url))
-    .map(l=>`<a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;gap:4px;background:#141c2e;border:1px solid #26406b;color:#8fb0f0;border-radius:20px;padding:2px 9px;font-size:11px;text-decoration:none;margin:3px 4px 0 0">🔗 ${esc(l.label||'링크')}</a>`).join('');
-
-  // ── 슬롯 모달
-  function openSlotModal(uid, date, hour, cellEl) {
-    const isOwner = currentUser.uid === uid;
-    const isBoss  = userRole === 'boss';
-    if(!isOwner && !isBoss) return;
-
-    const existing = {}; // 기존 데이터 로드
-    const slotId = `${uid}_${date}_${hour.replace(':','')}`;
-    getDoc(doc(db,"slots",slotId)).then(snap => {
-      const d = snap.exists() ? snap.data() : {};
-      showModal(`
-        <div class="modal-title">📌 슬롯 편집 — ${date} ${hour}</div>
-        <div class="form-group">
-          <label>업무 내용</label>
-          <input id="s-title" class="form-input" list="title-suggest" placeholder="업무 내용 (최근 업무 자동완성)" value="${d.title||''}">
-          <datalist id="title-suggest"></datalist>
+      <div class="row-between soft-card" style="padding:10px 14px;margin-bottom:14px">
+        <div class="clock-line" id="clock-status">아직 출근 전</div>
+        <div class="row" style="gap:6px">
+          <input id="work-start" type="time" class="mini-input" value="${ws}">
+          <span class="muted">~</span>
+          <input id="work-end" type="time" class="mini-input" value="${we}">
+          <button class="btn btn-ghost" onclick="saveWorkHours('${uid}')">시간</button>
+          <button class="btn btn-primary" onclick="doClock('${uid}','in')">출근</button>
+          <button class="btn btn-ghost" onclick="doClock('${uid}','out')">퇴근</button>
         </div>
-        <div class="form-group">
-          <label>상태</label>
-          <div class="status-btns">
-            ${Object.entries(STATUS_LABEL).map(([k,v])=>`<button class="status-btn ${d.status===k?'active':''}" data-s="${k}" style="--sc:${STATUS_COLOR[k]}">${v}</button>`).join('')}
-          </div>
-        </div>
-        <div class="form-group">
-          <label>메모 (선택)</label>
-          <textarea id="s-memo" class="form-textarea" placeholder="상세 내용, 이슈 등">${d.memo||''}</textarea>
-        </div>
-        <div class="form-group">
-          <label>🔗 관련 링크 (도메인·구글시트 등 · 여러 개 가능)</label>
-          <div id="s-links"></div>
-          <button type="button" class="btn btn-outline" style="margin-top:6px" onclick="addLinkRow()">＋ 링크 추가</button>
-        </div>
-        ${isOwner?`<div class="form-group" style="border:1px solid #4a2020;border-radius:8px;padding:10px;background:#1a1012">
-          <label class="row" style="gap:6px;color:#f59e0b;cursor:pointer;display:flex;align-items:center"><input type="checkbox" id="s-help" ${d.needsHelp&&!d.helpResolved?'checked':''}> 🆘 이 업무 관리자에게 도움요청</label>
-          <input id="s-help-note" class="form-input" style="margin-top:6px" placeholder="어디가 어려운지 한 줄 (선택)" value="${esc(d.helpNote)}">
-        </div>`:''}
-        ${isBoss&&d.needsHelp&&!d.helpResolved?`<div class="form-group"><button type="button" class="btn btn-outline" id="slot-resolve" style="color:#22c55e;border-color:#204d36">✅ 도움요청 해결로 표시</button></div>`:''}
-        ${isBoss&&!isOwner?`<div class="form-group"><label>관리자 코멘트</label><textarea id="s-comment" class="form-textarea" placeholder="직원에게 보낼 코멘트">${d.bossComment||''}</textarea></div>`:''}
-        <div class="modal-footer">
-          ${d.title?`<button class="btn btn-danger" id="slot-del">삭제</button>`:''}
-          <button class="btn btn-outline" onclick="closeModal()">취소</button>
-          <button class="btn btn-primary" id="slot-save">저장</button>
-        </div>
-      `);
-
-      // 상태 버튼 토글
-      let selStatus = d.status||'todo';
-      document.querySelectorAll('.status-btn').forEach(b=>{
-        b.addEventListener('click',()=>{
-          selStatus=b.dataset.s;
-          document.querySelectorAll('.status-btn').forEach(x=>x.classList.remove('active'));
-          b.classList.add('active');
-        });
-      });
-
-      // 링크 행 채우기(없으면 빈 행 1개)
-      (d.links||[]).forEach(l=>addLinkRow(l.label,l.url));
-      if(!(d.links&&d.links.length)) addLinkRow();
-
-      // 자주 쓰는 업무 자동완성(최근 업무 제안)
-      getDocs(query(collection(db,"slots"),where("uid","==",uid))).then(sn=>{
-        const titles=new Set(); sn.forEach(x=>{ const tt=(x.data().title||'').trim(); if(tt) titles.add(tt); });
-        const dl=$('title-suggest'); if(dl) dl.innerHTML=[...titles].slice(0,25).map(x=>`<option value="${esc(x)}"></option>`).join('');
-      }).catch(()=>{});
-
-      // 관리자: 도움요청 해결
-      if($('slot-resolve')) $('slot-resolve').onclick = async () => {
-        await setDoc(doc(db,"slots",slotId), { needsHelp:false, updatedAt:Timestamp.now() }, {merge:true});
-        alert('도움요청을 해결로 표시했습니다.'); closeModal();
-      };
-
-      $('slot-save').onclick = async () => {
-        const title = $('s-title').value.trim();
-        if(!title){ alert('업무 내용을 입력하세요'); return; }
-        const links = [...document.querySelectorAll('#s-links .tomorrow-row')]
-          .map(r=>({ label:r.querySelector('.link-label').value.trim(), url:r.querySelector('.link-url').value.trim() }))
-          .filter(l=>isValidUrl(l.url));
-        const payload = {
-          uid, date, hour, title,
-          status: selStatus,
-          memo: $('s-memo').value.trim(),
-          links,
-          weekStart: weekStart(new Date(date)),
-          updatedAt: Timestamp.now()
-        };
-        if($('s-help')){ payload.needsHelp = $('s-help').checked; payload.helpNote = $('s-help-note').value.trim(); }
-        if($('s-comment')) payload.bossComment = $('s-comment').value.trim();
-        await setDoc(doc(db,"slots",slotId), payload, {merge:true});
-
-        // 텔레그램 (직원 본인 저장 시)
-        if(isOwner) {
-          const name = userProfile.displayName||currentUser.email;
-          const doneQ = query(collection(db,"slots"),where("uid","==",uid),where("date","==",date));
-          const dSnap = await getDocs(doneQ);
-          let done=0,wip=0,skip=0;
-          dSnap.forEach(x=>{ const st=x.data().status; if(st==='done')done++; else if(st==='wip')wip++; else if(st==='skip')skip++; });
-          const summary = `✅ 완료 ${done}건 · ⏳ 진행중 ${wip}건 · ⛔ 불가 ${skip}건`;
-          await sendTelegram(name, date, summary);
-        }
-        renderCellContent(cellEl, payload);
-        closeModal();
-      };
-
-      if($('slot-del')) {
-        $('slot-del').onclick = async () => {
-          if(!confirm('이 슬롯을 삭제할까요?')) return;
-          await deleteDoc(doc(db,"slots",slotId));
-          renderCellContent(cellEl, null);
-          closeModal();
-        };
-      }
-    });
-  }
-
-  // ── 이전 업무일지(지난 기록) ──
-  async function renderHistory(uid, containerId){
-    const box = $(containerId); if(!box) return;
-    box.innerHTML = '<div class="section-title">🗂 지난 기록 (최근순 · 최대 3개월)</div><div class="loading">불러오는 중...</div>';
-    const snap = await getDocs(query(collection(db,"daily"),where("uid","==",uid)));
-    const days = []; snap.forEach(d=>days.push(d.data()));
-    days.sort((a,b)=>(b.date||'').localeCompare(a.date||''));
-    box.innerHTML = '<div class="section-title">🗂 지난 기록 (최근순 · 최대 3개월)</div>';
-    if(!days.length){ box.innerHTML += '<div class="empty-state">아직 기록이 없습니다</div>'; return; }
-    const listWrap = el('div','card');
-    days.forEach(d=>{
-      const goals=d.topGoals||[]; const gd=goals.filter(g=>g.done).length;
-      const row = el('div','tomorrow-row'); row.style.cursor='pointer'; row.style.justifyContent='space-between';
-      row.innerHTML = `<div><b style="color:#c8cad8">${d.date||''}</b> <span class="muted">🎯 ${gd}/${goals.length}${d.clockIn?' · 출근 '+d.clockIn:''}${(d.blocker||'').trim()?' · 🆘':''}</span></div><span class="muted">${d.selfFeedback?esc(d.selfFeedback.slice(0,28)):''} ▸</span>`;
-      row.onclick = ()=>openDayDetail(uid, d.date);
-      listWrap.appendChild(row);
-    });
-    box.appendChild(listWrap);
-    const detail = el('div'); detail.id='history-detail'; box.appendChild(detail);
-  }
-  window.openDayDetail = async (uid, date) => {
-    const box = $('history-detail'); if(!box) return;
-    box.innerHTML = '<div class="loading">불러오는 중...</div>';
-    const sn = await getDocs(query(collection(db,"slots"),where("uid","==",uid),where("date","==",date)));
-    const slots=[]; sn.forEach(x=>slots.push(x.data())); slots.sort((a,b)=>(a.hour||'').localeCompare(b.hour||''));
-    const dSnap = await getDoc(doc(db,"daily",`${uid}_${date}`)); const dd = dSnap.exists()?dSnap.data():{};
-    box.innerHTML = `<div class="card" style="margin-top:12px"><div class="card-title"><span class="dot" style="background:#5b8af0"></span> ${date} 상세</div>`+
-      (slots.length?slots.map(s=>`<div class="today-slot-row"><div class="slot-time">${s.hour}</div><div class="slot-body"><div class="slot-name">${esc(s.title||'')} <span style="color:${STATUS_COLOR[s.status]}">${STATUS_LABEL[s.status]||''}</span></div>${(s.links||[]).length?`<div style="margin-top:4px">${linkPills(s.links)}</div>`:''}</div></div>`).join(''):'<div class="empty-state">그날 시간별 업무 없음</div>')+
-      `<div class="card-title" style="margin-top:12px"><span class="dot" style="background:#22c55e"></span> 핵심목표</div><div class="feedback-box">${(dd.topGoals||[]).map(g=>`${g.done?'✅':'⬜'} ${esc(g.text)}`).join('<br>')||'(없음)'}</div>`+
-      `<div class="card-title" style="margin-top:12px"><span class="dot" style="background:#f59e0b"></span> 자체 피드백</div><div class="feedback-box">${esc(dd.selfFeedback)||'(없음)'}</div>`+
-      (dd.improve?`<div class="card-title" style="margin-top:12px"><span class="dot" style="background:#8fb0f0"></span> 배운 점/개선점</div><div class="feedback-box">${esc(dd.improve)}</div>`:'')+
-      `</div>`;
-  };
-  window.bossShowHistory = (uid) => renderHistory(uid, 'boss-history-wrap');
-
-  // ── 오늘 상세 뷰
-  function renderTodayDetail(uid, containerId) {
-    const wrap = $(containerId);
-    const dateStr = today();
-    const ws = (userProfile && userProfile.workStart) || DEFAULT_START;
-    const we = (userProfile && userProfile.workEnd) || DEFAULT_END;
-    wrap.innerHTML = `
-      <div style="display:flex;align-items:center;justify-content:space-between;margin:2px 0 12px">
-        <div class="section-title" style="margin:0">📋 오늘 — ${dateStr}</div>
-        <span id="save-status" style="font-size:12px;color:#6b7090">✍️ 입력하면 자동 저장돼요</span>
       </div>
-      <div id="today-status"></div>
-      <div id="routines-box" style="margin-bottom:14px"></div>
 
-      <div class="card" style="border-color:#3a3f6b;margin-bottom:14px">
-        <div class="card-title"><span class="dot" style="background:#5b8af0"></span> 오늘 업무 — 그냥 쭉 쓰기 (자동 정리)</div>
-        <textarea id="brain-dump" class="form-textarea" placeholder="예) 오전에 견적서 3건 발송, 10시 회의, 오후 신규페이지 초안 진행하다 디자인권한 없어서 막힘, 내일 주간보고 정리 예정" style="height:66px"></textarea>
-        <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
-          <span class="page-sub">쉼표·키워드(완료/막힘/예정)·시간을 넣으면 잘 정리돼요</span>
-          <button class="btn btn-primary" style="margin-left:auto" onclick="doAutoOrganize('${uid}')">✨ 자동 정리</button>
-        </div>
+      <div id="routines-box" style="margin-bottom:16px"></div>
+
+      <div class="sec-head"><span class="sec-title">오늘 할 일</span><span id="save-status" class="muted">입력하면 자동 저장돼요</span></div>
+      <div id="task-list"></div>
+      <div class="add-row">
+        <i class="add-plus">＋</i>
+        <input id="new-task" class="add-input" placeholder="한 줄씩 편하게 추가 · Enter" onkeydown="if(event.key==='Enter')addTask('${uid}')">
+        <button class="btn btn-primary" onclick="addTask('${uid}')">추가</button>
+      </div>
+      <div style="margin-top:8px"><span class="link-btn" onclick="toggleBulk()">여러 개 한번에 붙여넣기 ▾</span></div>
+      <div id="bulk-box" style="display:none;margin-top:8px">
+        <textarea id="brain-dump" class="ta" placeholder="예) 견적서 3건 발송, 10시 회의, 신규페이지 초안 진행중, 재고정리 예정" style="height:60px"></textarea>
+        <div class="row" style="justify-content:flex-end;margin-top:6px"><button class="btn btn-ghost" onclick="doAutoOrganize('${uid}')">자동 정리 미리보기</button></div>
         <div id="organize-preview"></div>
       </div>
 
-      <div class="card" style="margin-bottom:14px">
-        <div class="card-title"><span class="dot" style="background:#5b8af0"></span> 근태 · 근무시간</div>
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-          <input id="work-start" type="time" class="form-input" style="width:118px" value="${ws}">
-          <span class="page-sub">~</span>
-          <input id="work-end" type="time" class="form-input" style="width:118px" value="${we}">
-          <button class="btn btn-outline" onclick="saveWorkHours('${uid}')">시간 저장</button>
-          <span style="width:1px;height:22px;background:#252836;margin:0 6px"></span>
-          <button class="btn btn-primary" onclick="doClock('${uid}','in')">🟢 출근</button>
-          <button class="btn btn-outline" onclick="doClock('${uid}','out')">🔴 퇴근</button>
-          <span id="clock-status" class="page-sub"></span>
+      <div class="wrap-toggle" onclick="toggleWrapup()">
+        <span><i id="wrap-caret">▸</i> 하루 마무리 <span class="muted">· 회고 · 막힌 것 · 내일 계획</span></span>
+        <span id="wrap-check" class="muted"></span>
+      </div>
+      <div id="wrapup" style="display:none">
+        <div class="soft-card" style="margin-top:10px">
+          <label class="fld">자체 피드백</label>
+          <textarea id="self-feedback" class="ta" placeholder="오늘 이슈·반성·특이사항" oninput="scheduleDailySave()"></textarea>
+          <label class="fld" style="margin-top:12px">배운 점 / 개선점 (회고)</label>
+          <textarea id="improve-input" class="ta" placeholder="오늘 배운 점, 다음에 개선할 점" oninput="scheduleDailySave()"></textarea>
+          <label class="fld danger" style="margin-top:12px">막힌 것 (사장에게 표시)</label>
+          <textarea id="blocker-input" class="ta" placeholder="지금 막힌 것이 있으면 (없으면 비워두기)" oninput="scheduleDailySave()"></textarea>
+        </div>
+        <div class="soft-card" style="margin-top:12px">
+          <label class="fld">내일 계획 — 자세히</label>
+          <div id="carry-preview"></div>
+          <textarea id="tomorrow-detail" class="ta" placeholder="내일 무엇을 · 언제 · 왜 (자세히 적어두면 내일 아침 그대로 이어져요)" style="height:70px" oninput="scheduleDailySave()"></textarea>
+          <label class="fld" style="margin-top:12px">내일 할 일 목록</label>
+          <div id="tomorrow-slots"></div>
+          <button class="btn btn-ghost" style="width:100%;margin-top:8px" onclick="addTomorrowTask()">＋ 내일 할 일 추가</button>
         </div>
       </div>
-
-      <div class="two-col">
-        <div>
-          <div class="card" style="margin-bottom:14px">
-            <div class="card-title"><span class="dot" style="background:#22c55e"></span> 오늘의 핵심목표 Top 3</div>
-            <div id="goals-list"></div>
-            <div id="carryover"></div>
-          </div>
-          <div class="card" style="border-color:#4a2020">
-            <div class="card-title"><span class="dot" style="background:#ef4444"></span> 이슈 · 블로커 <span class="page-sub" style="font-weight:400">· 막히면 사장에게 표시</span></div>
-            <textarea id="blocker-input" class="form-textarea" placeholder="지금 막힌 것이 있으면 적어주세요 (없으면 비워두기)" style="height:56px" oninput="scheduleDailySave()"></textarea>
-          </div>
-        </div>
-        <div>
-          <div class="card" style="margin-bottom:14px">
-            <div class="card-title"><span class="dot" style="background:#f59e0b"></span> 자체 피드백</div>
-            <textarea id="self-feedback" class="form-textarea" placeholder="오늘 이슈, 반성, 특이사항" style="height:70px" oninput="scheduleDailySave()"></textarea>
-            <div class="card-title" style="margin-top:14px"><span class="dot" style="background:#8fb0f0"></span> 배운 점 / 개선점 (회고)</div>
-            <textarea id="improve-input" class="form-textarea" placeholder="오늘 배운 점, 다음에 개선할 점" style="height:60px" oninput="scheduleDailySave()"></textarea>
-            <div class="card-title" style="margin-top:14px"><span class="dot" style="background:#5b8af0"></span> 내일 업무 계획</div>
-            <div id="tomorrow-slots"></div>
-            <button class="btn btn-outline" style="width:100%;margin-top:8px" onclick="addTomorrowTask()">+ 내일 업무 추가</button>
-          </div>
-          <div id="today-slots-list"></div>
-        </div>
-      </div>
+      <div id="miss-check" style="margin-top:14px"></div>
     `;
-    renderGoalRows([]);
-    loadTodaySlots(uid, dateStr);
-    loadDailyReport(uid, dateStr);
-    renderTodayStatus(uid, dateStr);
-    loadRoutinesChecklist(uid, 'routines-box', dateStr);
+    await runCarryover(uid, dateStr);
+    await loadTodayTasks(uid, dateStr);
+    await loadDailyReport(uid, dateStr);
+    loadRoutinesChecklist(uid,'routines-box',dateStr);
+    refreshMode(uid, dateStr);
   }
 
-  // ── 자동저장 (버튼 없이 입력하면 바로 저장) ──
-  let _saveTimer = null;
-  function showSaveStatus(txt, color){ const el=$('save-status'); if(el){ el.textContent=txt; el.style.color=color||'#6b7090'; } }
-  window.scheduleDailySave = () => {
-    if(!currentUser) return;
-    showSaveStatus('저장 중…', '#f59e0b');
-    clearTimeout(_saveTimer);
-    _saveTimer = setTimeout(doDailySave, 1000);
-  };
-  async function doDailySave(){
-    if(!currentUser) return;
-    const uid = currentUser.uid, dateStr = today();
-    const goals = [...document.querySelectorAll('.goal-text')].map((t,i)=>({ text:t.value.trim(), done:document.querySelectorAll('.goal-check')[i]?.checked||false })).filter(g=>g.text);
-    const tasks = [...document.querySelectorAll('.tomorrow-task')].map(i=>i.value.trim()).filter(Boolean);
-    try {
-      await setDoc(doc(db,"daily",`${uid}_${dateStr}`), {
-        uid, date:dateStr,
-        selfFeedback: $('self-feedback')?.value.trim()||'',
-        improve: $('improve-input')?.value.trim()||'',
-        topGoals: goals,
-        blocker: $('blocker-input')?.value.trim()||'',
-        tomorrowTasks: tasks,
-        updatedAt: Timestamp.now()
-      }, {merge:true});
-      showSaveStatus('저장됨 ✓', '#22c55e');
-    } catch(e){ showSaveStatus('저장 실패 — 잠시 후 다시', '#ef4444'); }
-  }
-
-  // ── 필수 업무(루틴) + 단계별 가이드 ──
-  window.toggleGuide = (id) => { const g=$(id); if(g) g.style.display = g.style.display==='none' ? 'block':'none'; };
-
-  async function loadRoutinesChecklist(uid, containerId, dateStr){
-    const box = $(containerId); if(!box) return;
-    const canManage = (currentUser && currentUser.uid===uid) || userRole==='boss';
-    const [rSnap, dSnap] = await Promise.all([
-      getDocs(collection(db,"routines")),
-      getDoc(doc(db,"daily",`${uid}_${dateStr}`))
-    ]);
-    const routines = [];
-    rSnap.forEach(r=>{ const d=r.data(); if(d.active!==false && (d.targetUid==='all' || d.targetUid===uid)) routines.push({id:r.id, ...d}); });
-    routines.sort((a,b)=>(a.title||'').localeCompare(b.title||''));
-    const done = new Set(((dSnap.exists()?dSnap.data().routinesDone:[])||[]));
-    const manageLink = canManage ? `<span class="page-sub" style="cursor:pointer;color:#5b8af0" onclick="openRoutineManager('${uid}')">관리</span>` : '';
-    if(!routines.length){
-      box.innerHTML = `<div class="card"><div class="card-title" style="justify-content:space-between"><span><span class="dot" style="background:#22c55e"></span> ✅ 오늘의 필수 업무</span>${manageLink}</div><div class="page-sub">아직 등록된 필수 업무가 없어요.</div></div>`;
-      return;
+  // ── 자동 이월: 이전 마지막 근무일의 미완 → 오늘(원본 보존, 중복 방지) ──
+  async function runCarryover(uid, dateStr){
+    const dref=doc(db,"daily",`${uid}_${dateStr}`);
+    const dsnap=await getDoc(dref);
+    if(dsnap.exists() && dsnap.data().carryDone) return;
+    const all=await getDocs(query(collection(db,"slots"),where("uid","==",uid)));
+    const byDate={}; const todayTitles=[];
+    all.forEach(d=>{ const s=d.data(); if(!s.date) return; if(s.date===dateStr){ if(s.title) todayTitles.push(s.title.trim()); } else if(s.date<dateStr){ (byDate[s.date]=byDate[s.date]||[]).push(s); } });
+    const prev=Object.keys(byDate).sort().reverse();
+    if(!prev.length){ await setDoc(dref,{uid,date:dateStr,carryDone:'none',updatedAt:Timestamp.now()},{merge:true}); return; }
+    const src=prev[0];
+    const undone=byDate[src].filter(s=>s.title && s.status!=='done');
+    const writes=[];
+    for(const s of undone){
+      if(todayTitles.includes((s.title||'').trim())) continue;
+      const id=`${uid}_${dateStr}_${newKey()}`;
+      writes.push(setDoc(doc(db,"slots",id),{ uid, date:dateStr, title:s.title, status:'todo', important:!!s.important, plannedTime:s.plannedTime||s.hour||'', links:s.links||[], carriedFrom:src, weekStart:weekStart(new Date(dateStr)), updatedAt:Timestamp.now() }));
     }
-    const doneN = routines.filter(r=>done.has(r.id)).length;
-    let html = `<div class="card" style="border-color:#204d36"><div class="card-title" style="justify-content:space-between"><span><span class="dot" style="background:#22c55e"></span> ✅ 오늘의 필수 업무 <span class="page-sub" style="font-weight:400">· ${doneN}/${routines.length} 완료 · 매일 리셋</span></span>${manageLink}</div>`;
-    routines.forEach(r=>{
-      const on = done.has(r.id);
-      const gid = 'g_'+r.id;
-      html += `<div style="display:flex;align-items:flex-start;gap:10px;padding:9px 0;border-bottom:1px solid #1a1d28">
-        <span onclick="toggleRoutineDone('${uid}','${r.id}')" style="width:20px;height:20px;border-radius:6px;border:1.5px solid ${on?'#204d36':'#3a3f52'};background:${on?'#123021':'transparent'};color:#22c55e;display:inline-flex;align-items:center;justify-content:center;font-size:13px;cursor:pointer;flex-shrink:0">${on?'✓':''}</span>
-        <div style="flex:1">
-          <div style="display:flex;justify-content:space-between;gap:8px;align-items:center">
-            <span style="font-size:13px;font-weight:600;color:${on?'#5f6473':'#c8cad8'};${on?'text-decoration:line-through':''}">${esc(r.title)}${r.targetUid!=='all'?' <span class="page-sub" style="font-weight:400">· 개인</span>':''}</span>
-            ${(r.guide||'').trim()?`<span class="page-sub" style="cursor:pointer;color:#8fb0f0;white-space:nowrap" onclick="toggleGuide('${gid}')">📖 방법</span>`:''}
-          </div>
-          ${(r.guide||'').trim()?`<div id="${gid}" style="display:none;margin-top:6px;background:#101725;border:1px solid #26406b;border-radius:8px;padding:8px 10px;font-size:12px;color:#a9c2e8;line-height:1.7;white-space:pre-wrap">${esc(r.guide)}</div>`:''}
+    writes.push(setDoc(dref,{uid,date:dateStr,carryDone:src,updatedAt:Timestamp.now()},{merge:true}));
+    await Promise.all(writes);
+  }
+
+  // ── 오늘 할 일 로드/렌더 ──
+  async function loadTodayTasks(uid, dateStr){
+    const snap=await getDocs(query(collection(db,"slots"),where("uid","==",uid),where("date","==",dateStr)));
+    todayTasks=[]; snap.forEach(d=>todayTasks.push({id:d.id, ...d.data()}));
+    renderTaskList(uid);
+  }
+  function sortTasks(a,b){
+    if(!!b.important - !!a.important) return (!!b.important)-(!!a.important);
+    const ta=a.plannedTime||a.hour||'99:99', tb=b.plannedTime||b.hour||'99:99';
+    if(ta!==tb) return ta.localeCompare(tb);
+    return (a.updatedAt?.seconds||0)-(b.updatedAt?.seconds||0);
+  }
+  function renderTaskList(uid){
+    const box=$('task-list'); if(!box) return;
+    if(!todayTasks.length){ box.innerHTML='<div class="empty">아직 오늘 할 일이 없어요. 아래에 한 줄 적어보세요.</div>'; updateMissCheck(); return; }
+    const arr=[...todayTasks].sort(sortTasks);
+    box.innerHTML='';
+    arr.forEach(t=>{
+      const st=t.status==='skip'?'todo':(t.status||'todo');
+      const carried=!!t.carriedFrom;
+      const row=el('div','task-row'+(t.important?' task-important':'')+(carried?' carry-item':'')+(st==='done'?' task-done':''));
+      const seg=(s,lbl,cls)=>`<button class="seg ${st===s?'on '+cls:''}" onclick="setTaskStatus('${uid}','${t.id}','${s}')">${lbl}</button>`;
+      row.innerHTML=`
+        <span class="star" onclick="toggleImportant('${uid}','${t.id}')" title="중요 표시">${t.important?'★':'☆'}</span>
+        <div class="task-main">
+          <div class="task-title">${esc(t.title)}${carried?' <span class="pill pill-carry">이월</span>':''}${t.needsHelp&&!t.helpResolved?' <span class="pill pill-help">도움요청</span>':''}</div>
+          ${(t.plannedTime||t.hour)?`<span class="task-meta">${t.plannedTime||t.hour}</span>`:''}
+          ${(t.links||[]).length?`<div class="task-links">${linkPills(t.links)}</div>`:''}
+          ${t.bossComment?`<div class="boss-inline">👑 ${esc(t.bossComment)}</div>`:''}
         </div>
-      </div>`;
-    });
-    html += `</div>`;
-    box.innerHTML = html;
-  }
-
-  window.toggleRoutineDone = async (uid, rid) => {
-    const dateStr = today();
-    const ref = doc(db,"daily",`${uid}_${dateStr}`);
-    const snap = await getDoc(ref);
-    const cur = new Set(((snap.exists()?snap.data().routinesDone:[])||[]));
-    if(cur.has(rid)) cur.delete(rid); else cur.add(rid);
-    await setDoc(ref, { uid, date:dateStr, routinesDone:[...cur], updatedAt:Timestamp.now() }, {merge:true});
-    loadRoutinesChecklist(uid, 'routines-box', dateStr);
-  };
-
-  window.openRoutineManager = async (uid) => {
-    const boss = userRole==='boss';
-    const rSnap = await getDocs(collection(db,"routines"));
-    const list = []; rSnap.forEach(r=>{ const d=r.data(); if(boss || d.createdBy===currentUser.uid) list.push({id:r.id, ...d}); });
-    list.sort((a,b)=>(a.title||'').localeCompare(b.title||''));
-    let staffList = []; let targetOpts = `<option value="${boss?'all':currentUser.uid}">${boss?'전 직원 공통':'나만'}</option>`;
-    if(boss){
-      const us = await getDocs(query(collection(db,"users"),where("role","==","staff")));
-      us.forEach(u=>staffList.push({uid:u.id, name:u.data().displayName||u.id}));
-      targetOpts += staffList.map(s=>`<option value="${s.uid}">${esc(s.name)}만</option>`).join('');
-    }
-    const nameOf = (t)=> t==='all'?'전체' : (staffList.find(s=>s.uid===t)?.name || (t===currentUser.uid?'나':'개인'));
-    showModal(`
-      <div class="modal-title">🧩 필수 업무 관리</div>
-      <div class="form-group"><label>제목</label><input id="rt-title" class="form-input" placeholder="예: 오픈 점검"></div>
-      ${boss?`<div class="form-group"><label>대상</label><select id="rt-target" class="form-input">${targetOpts}</select></div>`:`<input type="hidden" id="rt-target" value="${currentUser.uid}">`}
-      <div class="form-group"><label>작업 절차 (SOP) — 단계별 방법 (선택)</label><textarea id="rt-guide" class="form-textarea" style="height:100px" placeholder="1. ...&#10;2. ...&#10;3. ..."></textarea></div>
-      <div style="text-align:right"><button class="btn btn-primary" onclick="saveRoutine('${uid}')">＋ 추가</button></div>
-      <div style="border-top:1px solid #252836;margin-top:14px;padding-top:12px">
-        <div class="page-sub" style="margin-bottom:6px">등록된 필수 업무 (${list.length})</div>
-        ${list.length? list.map(r=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #1a1d28"><span style="font-size:13px;color:#c8cad8">${esc(r.title)} <span class="page-sub">· ${esc(nameOf(r.targetUid))}</span></span><button class="btn btn-danger" onclick="deleteRoutine('${r.id}','${uid}')">삭제</button></div>`).join('') : '<div class="page-sub">아직 없음</div>'}
-      </div>
-      <div class="modal-footer"><button class="btn btn-outline" onclick="closeModal()">닫기</button></div>
-    `);
-  };
-  window.saveRoutine = async (uid) => {
-    const title = $('rt-title')?.value.trim(); if(!title){ alert('제목을 입력하세요'); return; }
-    const tgt = (userRole==='boss') ? ($('rt-target')?.value||'all') : currentUser.uid;
-    const guide = $('rt-guide')?.value.trim()||'';
-    await addDoc(collection(db,"routines"), { title, guide, targetUid:tgt, createdBy:currentUser.uid, active:true, createdAt:Timestamp.now() });
-    openRoutineManager(uid);
-    loadRoutinesChecklist(uid, 'routines-box', today());
-  };
-  window.deleteRoutine = async (rid, uid) => {
-    if(!confirm('이 필수 업무를 삭제할까요?')) return;
-    await deleteDoc(doc(db,"routines",rid));
-    openRoutineManager(uid);
-    loadRoutinesChecklist(uid, 'routines-box', today());
-  };
-
-  // 일지 완성도 + 어제 개선점 리마인드
-  async function renderTodayStatus(uid, dateStr){
-    const box = $('today-status'); if(!box) return;
-    const y = new Date(dateStr); y.setDate(y.getDate()-1); const yStr = y.toISOString().slice(0,10);
-    const [ySnap, tSnap, slotSnap, slotYSnap] = await Promise.all([
-      getDoc(doc(db,"daily",`${uid}_${yStr}`)),
-      getDoc(doc(db,"daily",`${uid}_${dateStr}`)),
-      getDocs(query(collection(db,"slots"),where("uid","==",uid),where("date","==",dateStr))),
-      getDocs(query(collection(db,"slots"),where("uid","==",uid),where("date","==",yStr)))
-    ]);
-    const yData = ySnap.exists()?ySnap.data():{};
-    const yImprove = (yData.improve||'').trim();
-    const t = tSnap.exists()?tSnap.data():{};
-    const goals = (t.topGoals||[]).filter(g=>(g.text||'').trim()).length;
-    const has = { '출근':!!t.clockIn, '시간표':slotSnap.size>0, '목표':goals>0, '회고':!!((t.selfFeedback||'').trim()||(t.improve||'').trim()) };
-    const keys = Object.keys(has); const missing = keys.filter(k=>!has[k]);
-    const pct = Math.round((keys.length-missing.length)/keys.length*100);
-    const color = pct>=100?'#22c55e':pct>=50?'#f59e0b':'#ef4444';
-    let html = '';
-    if(yImprove) html += `<div style="background:#141c2e;border:1px solid #26406b;border-radius:8px;padding:8px 12px;font-size:12px;color:#8fb0f0;margin-bottom:8px">💡 어제 개선점: ${esc(yImprove)}</div>`;
-    html += `<div style="background:#161922;border:1px solid #252836;border-radius:8px;padding:8px 12px;font-size:12px;margin-bottom:8px"><b style="color:${color}">오늘 일지 완성도 ${pct}%</b> · ${keys.map(k=>`${has[k]?'✅':'⬜'} ${k}`).join(' · ')}${missing.length?` <span style="color:#f59e0b">— ${missing.join(', ')} 비었어요</span>`:' 👍'}</div>`;
-    box.innerHTML = html;
-
-    // 자동 이월: 어제 '내일 계획' → 오늘 목표 (오늘 목표가 완전히 비었을 때만)
-    const goalInputs = [...document.querySelectorAll('.goal-text')];
-    const goalsEmptyDom = goalInputs.length>0 && goalInputs.every(i=>!i.value.trim());
-    const yTomorrow = (yData.tomorrowTasks||[]).filter(s=>(s||'').trim());
-    if(goalsEmptyDom && goals===0 && yTomorrow.length){
-      renderGoalRows(yTomorrow.slice(0,3).map(x=>({text:x,done:false})));
-      showSaveStatus('어제 계획을 오늘 목표로 가져왔어요 ✓','#8fb0f0');
-      scheduleDailySave();
-    }
-    // 어제 못 끝낸 일 리마인더
-    const cbox = $('carryover');
-    if(cbox){
-      const undone=[]; slotYSnap.forEach(d=>{ const s=d.data(); if(s.title && s.status!=='done') undone.push(s.title); });
-      cbox.innerHTML = undone.length ? `<div style="margin-top:8px;background:#141c2e;border:1px solid #26406b;border-radius:8px;padding:8px 10px;font-size:12px;color:#8fb0f0">↪️ 어제 못 끝낸 일 ${undone.length}개: ${undone.slice(0,4).map(esc).join(', ')}</div>` : '';
-    }
-  }
-
-  // 핵심목표 3줄 렌더 (체크 + 텍스트)
-  function renderGoalRows(goals) {
-    const box = $('goals-list'); if(!box) return;
-    box.innerHTML = '';
-    for(let i=0;i<3;i++){
-      const g = goals[i] || {text:'',done:false};
-      const row = el('div','tomorrow-row');
-      row.innerHTML =
-        `<input type="checkbox" class="goal-check" ${g.done?'checked':''} onchange="scheduleDailySave()" style="width:18px;height:18px;flex-shrink:0">`+
-        `<input class="form-input goal-text" placeholder="핵심목표 ${i+1}" value="${(g.text||'').replace(/"/g,'&quot;')}" oninput="scheduleDailySave()">`;
+        <div class="seg-group">${seg('done','완료','seg-done')}${seg('wip','진행','seg-wip')}${seg('todo','못함','seg-todo')}</div>
+        <span class="more" onclick="openTaskDetail('${uid}','${t.id}')" title="상세">⋯</span>`;
       box.appendChild(row);
-    }
+    });
+    updateMissCheck();
   }
 
-  async function loadTodaySlots(uid, dateStr) {
-    const q = query(collection(db,"slots"),where("uid","==",uid),where("date","==",dateStr));
-    const snap = await getDocs(q);
-    const slots = [];
-    snap.forEach(d=>slots.push(d.data()));
-    slots.sort((a,b)=>a.hour.localeCompare(b.hour));
-
-    const list = $('today-slots-list');
-    if(!list) return;
-    list.innerHTML = '<div class="card-title"><span class="dot" style="background:#22c55e"></span> 오늘 시간별 업무</div>';
-
-    if(slots.length===0){
-      list.innerHTML += '<div class="empty-state">타임테이블에서 업무를 추가하세요</div>';
-      return;
-    }
-    slots.forEach(s=>{
-      const row = el('div','today-slot-row');
-      row.innerHTML = `
-        <div class="slot-time">${s.hour}</div>
-        <div class="slot-body">
-          <div class="slot-name">${s.title}${s.needsHelp?' <span style="color:#f59e0b;font-size:11px">🆘</span>':''}</div>
-          ${s.memo?`<div class="slot-memo">${s.memo}</div>`:''}
-          ${s.needsHelp?`<div style="color:#f59e0b;font-size:11px;margin-top:2px">🆘 도움요청${s.helpNote?': '+esc(s.helpNote):''}</div>`:''}
-          ${(s.links||[]).length?`<div style="margin-top:4px">${linkPills(s.links)}</div>`:''}
-          ${s.bossComment?`<div class="boss-comment-inline">👑 ${s.bossComment}</div>`:''}
-        </div>
-        <div class="slot-st" style="color:${STATUS_COLOR[s.status]}">${STATUS_LABEL[s.status]||''}</div>
-      `;
-      list.appendChild(row);
-    });
-
-    // 실시간
-    const unsub = onSnapshot(q, snap2 => {
-      const arr=[];
-      snap2.forEach(d=>arr.push(d.data()));
-      arr.sort((a,b)=>a.hour.localeCompare(b.hour));
-      list.innerHTML = '<div class="card-title"><span class="dot" style="background:#22c55e"></span> 오늘 시간별 업무</div>';
-      arr.forEach(s=>{
-        const row=el('div','today-slot-row');
-        row.innerHTML=`<div class="slot-time">${s.hour}</div><div class="slot-body"><div class="slot-name">${s.title}${s.needsHelp?' <span style="color:#f59e0b;font-size:11px">🆘</span>':''}</div>${s.memo?`<div class="slot-memo">${s.memo}</div>`:''}${s.needsHelp?`<div style="color:#f59e0b;font-size:11px;margin-top:2px">🆘 도움요청${s.helpNote?': '+esc(s.helpNote):''}</div>`:''}${(s.links||[]).length?`<div style="margin-top:4px">${linkPills(s.links)}</div>`:''}${s.bossComment?`<div class="boss-comment-inline">👑 ${s.bossComment}</div>`:''}</div><div class="slot-st" style="color:${STATUS_COLOR[s.status]}">${STATUS_LABEL[s.status]||''}</div>`;
-        list.appendChild(row);
-      });
-    });
-    unsubListeners.push(unsub);
+  window.addTask = async (uid) => {
+    const inp=$('new-task'); const title=(inp?.value||'').trim(); if(!title) return;
+    const id=`${uid}_${today()}_${newKey()}`;
+    const payload={ uid, date:today(), title, status:'todo', important:false, weekStart:weekStart(new Date()), updatedAt:Timestamp.now() };
+    await setDoc(doc(db,"slots",id), payload, {merge:true});
+    todayTasks.push({id, ...payload}); inp.value=''; renderTaskList(uid); inp.focus();
+  };
+  window.setTaskStatus = async (uid, id, status) => {
+    const t=todayTasks.find(x=>x.id===id); if(!t) return;
+    t.status=status; renderTaskList(uid);
+    await setDoc(doc(db,"slots",id),{status,updatedAt:Timestamp.now()},{merge:true});
+    syncGoals(uid);
+  };
+  window.toggleImportant = async (uid, id) => {
+    const t=todayTasks.find(x=>x.id===id); if(!t) return;
+    if(!t.important && todayTasks.filter(x=>x.important).length>=3){ alert('중요 표시는 최대 3개까지예요.'); return; }
+    t.important=!t.important; renderTaskList(uid);
+    await setDoc(doc(db,"slots",id),{important:t.important,updatedAt:Timestamp.now()},{merge:true});
+    syncGoals(uid);
+  };
+  window.deleteTask = async (uid, id) => {
+    if(!confirm('이 항목을 삭제할까요?')) return;
+    await deleteDoc(doc(db,"slots",id)); todayTasks=todayTasks.filter(x=>x.id!==id); renderTaskList(uid); syncGoals(uid); closeModal();
+  };
+  // 중요표시 → daily.topGoals 미러(관리자 화면 호환)
+  async function syncGoals(uid){
+    const goals=todayTasks.filter(t=>t.important).map(t=>({text:t.title, done:t.status==='done'}));
+    try{ await setDoc(doc(db,"daily",`${uid}_${today()}`),{uid,date:today(),topGoals:goals,updatedAt:Timestamp.now()},{merge:true}); }catch(e){}
+    updateMissCheck();
   }
 
-  async function loadDailyReport(uid, dateStr) {
-    const snap = await getDoc(doc(db,"daily",`${uid}_${dateStr}`));
-    const d = snap.exists() ? snap.data() : {};
-    if($('self-feedback')) $('self-feedback').value = d.selfFeedback||'';
-    if($('improve-input')) $('improve-input').value = d.improve||'';
-    if($('tomorrow-slots')) $('tomorrow-slots').innerHTML = ''; // 중복 방지
-    if(d.tomorrowTasks) d.tomorrowTasks.forEach(t=>addTomorrowTask(t));
-    if(d.topGoals && d.topGoals.length) renderGoalRows(d.topGoals);
-    if($('blocker-input')) $('blocker-input').value = d.blocker||'';
+  // ── 링크/도움 ──
+  const linkPills = (links) => (links||[]).filter(l=>isValidUrl(l.url)).map(l=>`<a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer" class="linkpill">🔗 ${esc(l.label||'링크')}</a>`).join('');
+  window.addLinkRow = (label='', url='') => {
+    const box=$('s-links'); if(!box) return;
+    const row=el('div','link-edit');
+    row.innerHTML=`<input class="mini-input link-label" placeholder="이름" style="width:110px" value="${esc(label)}"><input class="mini-input link-url" placeholder="https://..." value="${esc(url)}"><button type="button" onclick="this.parentElement.remove()" class="xbtn">✕</button>`;
+    box.appendChild(row);
+  };
+
+  // ── 오늘 항목 상세 모달(시간·메모·링크·도움·삭제) ──
+  window.openTaskDetail = (uid, id) => {
+    const t=todayTasks.find(x=>x.id===id); if(!t) return;
+    showModal(`
+      <div class="modal-title">항목 상세</div>
+      <div class="form-group"><label>제목</label><input id="d-title" class="mini-input" style="width:100%" value="${esc(t.title)}"></div>
+      <div class="form-group"><label>예정 시간 (선택)</label><input id="d-time" type="time" class="mini-input" value="${t.plannedTime||t.hour||''}"></div>
+      <div class="form-group"><label>메모 (선택)</label><textarea id="d-memo" class="ta">${esc(t.memo)}</textarea></div>
+      <div class="form-group"><label>🔗 관련 링크</label><div id="s-links"></div><button type="button" class="btn btn-ghost" style="margin-top:6px" onclick="addLinkRow()">＋ 링크</button></div>
+      <div class="form-group help-box"><label class="row" style="gap:6px;cursor:pointer"><input type="checkbox" id="d-help" ${t.needsHelp&&!t.helpResolved?'checked':''}> 🆘 이 업무 관리자에게 도움요청</label><input id="d-helpnote" class="mini-input" style="width:100%;margin-top:6px" placeholder="어디가 어려운지 한 줄 (선택)" value="${esc(t.helpNote)}"></div>
+      <div class="modal-footer"><button class="btn btn-danger" onclick="deleteTask('${uid}','${id}')">삭제</button><button class="btn btn-ghost" onclick="closeModal()">취소</button><button class="btn btn-primary" onclick="saveTaskDetail('${uid}','${id}')">저장</button></div>
+    `);
+    (t.links||[]).forEach(l=>addLinkRow(l.label,l.url)); if(!(t.links&&t.links.length)) addLinkRow();
+  };
+  window.saveTaskDetail = async (uid, id) => {
+    const t=todayTasks.find(x=>x.id===id); if(!t) return;
+    const title=$('d-title').value.trim(); if(!title){ alert('제목을 입력하세요'); return; }
+    const links=[...document.querySelectorAll('#s-links .link-edit')].map(r=>({label:r.querySelector('.link-label').value.trim(),url:r.querySelector('.link-url').value.trim()})).filter(l=>isValidUrl(l.url));
+    const payload={ title, plannedTime:$('d-time').value||'', memo:$('d-memo').value.trim(), links, needsHelp:$('d-help').checked, helpNote:$('d-helpnote').value.trim(), updatedAt:Timestamp.now() };
+    Object.assign(t,payload);
+    await setDoc(doc(db,"slots",id), payload, {merge:true});
+    renderTaskList(uid); closeModal();
+  };
+
+  // ── 자동저장(회고/막힌것/내일계획/내일목록) ──
+  let _saveTimer=null;
+  function showSaveStatus(txt,color){ const e=$('save-status'); if(e){ e.textContent=txt; e.style.color=color||'var(--text-3)'; } }
+  window.scheduleDailySave = () => { if(!currentUser) return; showSaveStatus('저장 중…','var(--warn)'); clearTimeout(_saveTimer); _saveTimer=setTimeout(doDailySave,1000); };
+  async function doDailySave(){
+    if(!currentUser) return; const uid=currentUser.uid, dateStr=today();
+    const tasks=[...document.querySelectorAll('.tomorrow-task')].map(i=>i.value.trim()).filter(Boolean);
+    try{
+      await setDoc(doc(db,"daily",`${uid}_${dateStr}`),{ uid, date:dateStr,
+        selfFeedback:$('self-feedback')?.value.trim()||'', improve:$('improve-input')?.value.trim()||'',
+        blocker:$('blocker-input')?.value.trim()||'', tomorrowTasks:tasks, tomorrowDetail:$('tomorrow-detail')?.value.trim()||'',
+        updatedAt:Timestamp.now() },{merge:true});
+      showSaveStatus('저장됨 ✓','var(--success)'); updateMissCheck();
+    }catch(e){ showSaveStatus('저장 실패 — 잠시 후 다시','var(--danger)'); }
+  }
+  async function loadDailyReport(uid, dateStr){
+    const snap=await getDoc(doc(db,"daily",`${uid}_${dateStr}`)); const d=snap.exists()?snap.data():{};
+    if($('self-feedback')) $('self-feedback').value=d.selfFeedback||'';
+    if($('improve-input')) $('improve-input').value=d.improve||'';
+    if($('blocker-input')) $('blocker-input').value=d.blocker||'';
+    if($('tomorrow-detail')) $('tomorrow-detail').value=d.tomorrowDetail||'';
+    if($('tomorrow-slots')){ $('tomorrow-slots').innerHTML=''; (d.tomorrowTasks||[]).forEach(t=>addTomorrowTask(t)); }
     renderClockStatus(d);
+    // 어제 개선점 리마인드 배너
+    const y=new Date(dateStr); y.setDate(y.getDate()-1);
+    updateMissCheck();
   }
-
-  // 출퇴근 상태 한 줄 표시(지각 자동)
-  function renderClockStatus(d){
-    const box = $('clock-status'); if(!box) return;
-    const ws = (userProfile && userProfile.workStart) || DEFAULT_START;
-    const parts = [];
-    if(d.clockIn){ const li = lateInfo(d.clockIn, ws); parts.push(`출근 ${d.clockIn}${li.late?` · <span style="color:#f59e0b;font-weight:700">지각 ${li.mins}분</span>`:` · <span style="color:#22c55e">정상</span>`}`); }
-    else parts.push('<span style="color:#6b7090">아직 출근 전</span>');
-    if(d.clockOut) parts.push(`· 퇴근 ${d.clockOut}`);
-    box.innerHTML = parts.join(' ');
-  }
-
   window.addTomorrowTask = (val='') => {
-    const wrap = $('tomorrow-slots');
-    if(!wrap) return;
-    const row = el('div','tomorrow-row');
-    row.innerHTML = `<input class="form-input tomorrow-task" placeholder="내일 할 일" value="${(val||'').replace(/"/g,'&quot;')}" oninput="scheduleDailySave()"><button onclick="this.parentElement.remove();scheduleDailySave()">✕</button>`;
+    const wrap=$('tomorrow-slots'); if(!wrap) return;
+    const row=el('div','tmr-row');
+    row.innerHTML=`<input class="mini-input tomorrow-task" style="flex:1" placeholder="내일 할 일" value="${(val||'').replace(/"/g,'&quot;')}" oninput="scheduleDailySave()"><button class="xbtn" onclick="this.parentElement.remove();scheduleDailySave()">✕</button>`;
     wrap.appendChild(row);
   };
+  window.toggleBulk = () => { const b=$('bulk-box'); if(b) b.style.display=b.style.display==='none'?'block':'none'; };
+  window.toggleWrapup = () => { const w=$('wrapup'); const c=$('wrap-caret'); if(w){ const open=w.style.display==='none'; w.style.display=open?'block':'none'; if(c)c.textContent=open?'▾':'▸'; } };
 
-  window.saveDailyReport = async (uid) => {
-    const dateStr = today();
-    const feedback = $('self-feedback')?.value.trim()||'';
-    const tasks = [...document.querySelectorAll('.tomorrow-task')].map(i=>i.value.trim()).filter(Boolean);
-    await setDoc(doc(db,"daily",`${uid}_${dateStr}`), {
-      uid, date: dateStr,
-      selfFeedback: feedback,
-      improve: $('improve-input')?.value.trim()||'',
-      tomorrowTasks: tasks,
-      updatedAt: Timestamp.now()
-    }, {merge:true});
-
-    // 텔레그램
-    const q = query(collection(db,"slots"),where("uid","==",uid),where("date","==",dateStr));
-    const snap = await getDocs(q);
-    let done=0,wip=0,undone=0;
-    snap.forEach(x=>{ const st=x.data().status; if(st==='done')done++; else if(st==='wip')wip++; else undone++; });
-    const name = userProfile.displayName||currentUser.email;
-    const summary = `✅ 완료 ${done}건 · ⏳ 진행중 ${wip}건 · 📋 예정/미완 ${undone}건\n💬 "${feedback.slice(0,60)}${feedback.length>60?'…':''}"`;
-    await sendTelegram(name, dateStr, summary);
-    alert('저장되었습니다.');
-  };
-
-  // ── 근무시간·출퇴근·목표·블로커·자동정리 ──
-  let pendingOrganize = null;
-
+  // ── 출퇴근/근무시간 ──
+  function renderClockStatus(d){
+    const box=$('clock-status'); if(!box) return;
+    const ws=(userProfile&&userProfile.workStart)||DEFAULT_START;
+    let html='';
+    if(d.clockIn){ const li=lateInfo(d.clockIn,ws); html=`출근 ${d.clockIn} ${li.late?`<span class="late">지각 ${li.mins}분</span>`:'<span class="ontime">정상</span>'}`; }
+    else html='<span class="muted">아직 출근 전</span>';
+    if(d.clockOut) html+=` · 퇴근 ${d.clockOut}`;
+    box.innerHTML=html;
+  }
   window.saveWorkHours = async (uid) => {
-    const s = $('work-start')?.value, e = $('work-end')?.value;
-    if(!s || !e){ alert('시작·종료 시간을 입력하세요'); return; }
-    if(toMin(e) <= toMin(s)){ alert('종료 시간이 시작보다 늦어야 합니다'); return; }
-    await setDoc(doc(db,"users",uid), { workStart:s, workEnd:e }, {merge:true});
+    const s=$('work-start')?.value, e=$('work-end')?.value;
+    if(!s||!e){ alert('시작·종료 시간을 입력하세요'); return; }
+    if(toMin(e)<=toMin(s)){ alert('종료 시간이 시작보다 늦어야 합니다'); return; }
+    await setDoc(doc(db,"users",uid),{workStart:s,workEnd:e},{merge:true});
     if(userProfile){ userProfile.workStart=s; userProfile.workEnd=e; }
-    if($('tab-week')) renderWeekTimetable(uid,'tab-week', hoursRange(s,e));
-    alert('근무시간이 저장되었습니다. 타임테이블이 내 시간대로 조정됩니다.');
+    refreshMode(uid, today());
+    showSaveStatus('근무시간 저장됨 ✓','var(--success)');
   };
-
   window.doClock = async (uid, which) => {
-    const dateStr = today(), t = nowHM();
-    const ref = doc(db,"daily",`${uid}_${dateStr}`);
-    if(which==='out'){
-      const s = await getDoc(ref);
-      if((!s.exists() || !s.data().clockIn) && !confirm('출근 기록이 없어요. 그래도 퇴근을 찍을까요?')) return;
-      await setDoc(ref, { uid, date:dateStr, clockOut:t, updatedAt:Timestamp.now() }, {merge:true});
-    } else {
-      await setDoc(ref, { uid, date:dateStr, clockIn:t, updatedAt:Timestamp.now() }, {merge:true});
+    const dateStr=today(), t=nowHM(); const ref=doc(db,"daily",`${uid}_${dateStr}`);
+    if(which==='out'){ const s=await getDoc(ref); if((!s.exists()||!s.data().clockIn)&&!confirm('출근 기록이 없어요. 그래도 퇴근을 찍을까요?')) return; await setDoc(ref,{uid,date:dateStr,clockOut:t,updatedAt:Timestamp.now()},{merge:true}); }
+    else await setDoc(ref,{uid,date:dateStr,clockIn:t,updatedAt:Timestamp.now()},{merge:true});
+    const s2=await getDoc(ref); renderClockStatus(s2.exists()?s2.data():{}); refreshMode(uid,dateStr);
+  };
+
+  // ── 아침 계획 / 저녁 체크 모드 ──
+  async function refreshMode(uid, dateStr){
+    const snap=await getDoc(doc(db,"daily",`${uid}_${dateStr}`)); const d=snap.exists()?snap.data():{};
+    const box=$('mode-banner'); if(!box) return;
+    const now=toMin(nowHM()), ci=toMin(d.clockIn), we=toMin((userProfile&&userProfile.workEnd)||'');
+    let html='';
+    if(ci!=null && now>=ci && now<ci+20){
+      const left=ci+20-now;
+      html=`<div class="mode mode-am"><i class="mi">☀️</i><div><div class="mt">계획 시간 · ${left}분 남음</div><div class="ms">오늘 할 일을 한 번 더 정리하세요. 어제 못한 일은 위에 이월돼 있어요.</div></div></div>`;
+    } else if(we!=null && now>=we-20 && now<we+90){
+      const left=Math.max(0,we-now);
+      html=`<div class="mode mode-pm"><i class="mi">🌇</i><div><div class="mt">마무리 체크 · ${left>0?left+'분 남음':'퇴근 시간'}</div><div class="ms">오늘 한 일을 완료/진행/못함으로 체크하고, '하루 마무리'에서 내일 계획을 적어주세요.</div></div></div>`;
     }
-    const s2 = await getDoc(ref);
-    renderClockStatus(s2.exists()?s2.data():{});
-  };
+    box.innerHTML=html;
+  }
 
-  window.saveGoals = async (uid) => {
-    const checks = [...document.querySelectorAll('.goal-check')];
-    const texts  = [...document.querySelectorAll('.goal-text')];
-    const goals = texts.map((t,i)=>({ text:t.value.trim(), done: checks[i]?.checked||false })).filter(g=>g.text);
-    await setDoc(doc(db,"daily",`${uid}_${today()}`), { uid, date:today(), topGoals:goals, updatedAt:Timestamp.now() }, {merge:true});
-    alert('핵심목표가 저장되었습니다.');
-  };
+  // ── "빠진 것 없나요?" ──
+  function updateMissCheck(){
+    const box=$('miss-check'); if(!box) return;
+    const unchecked=todayTasks.filter(t=>t.title && (t.status==='todo'||t.status==='skip')).length;
+    const fb=($('self-feedback')?.value||'').trim(), bl=($('blocker-input')?.value||'').trim(), tmr=($('tomorrow-detail')?.value||'').trim();
+    const chips=[];
+    chips.push(unchecked>0?`<span class="chip chip-bad">미체크 ${unchecked}개</span>`:`<span class="chip chip-ok">할 일 체크 완료</span>`);
+    chips.push(fb?`<span class="chip chip-ok">회고 작성</span>`:`<span class="chip chip-bad">회고 비었음</span>`);
+    chips.push(tmr?`<span class="chip chip-ok">내일 계획</span>`:`<span class="chip chip-bad">내일 계획 비었음</span>`);
+    const wc=$('wrap-check'); if(wc) wc.innerHTML = (fb&&tmr)?'<span class="ontime">마무리 완료</span>':'<span class="muted">펼쳐서 3가지만</span>';
+    box.innerHTML=`<div class="soft-card miss"><span class="miss-t">빠진 것 없나요?</span> ${chips.join('')}</div>`;
+  }
 
-  window.saveBlocker = async (uid) => {
-    const b = $('blocker-input')?.value.trim()||'';
-    await setDoc(doc(db,"daily",`${uid}_${today()}`), { uid, date:today(), blocker:b, updatedAt:Timestamp.now() }, {merge:true});
-    alert(b ? '블로커가 저장되었습니다 (사장 화면에 표시됩니다).' : '블로커를 비웠습니다.');
-  };
-
+  // ── 자동정리(여러 개 붙여넣기 → 항목 추가) ──
+  let pendingOrganize=null;
   window.doAutoOrganize = (uid) => {
-    const text = $('brain-dump')?.value||'';
-    const box = $('organize-preview'); if(!box) return;
-    if(!text.trim()){ box.innerHTML = '<div class="page-sub" style="margin-top:10px">먼저 위 칸에 오늘 한 일을 적어주세요.</div>'; pendingOrganize=null; return; }
-    const r = autoOrganize(text); pendingOrganize = r;
-    const chips = [];
-    r.items.forEach(it=>{
-      const c = STATUS_COLOR[it.status]||'#6b7280';
-      chips.push(`<span style="display:inline-block;font-size:12px;font-weight:600;padding:3px 9px;border-radius:20px;background:#1e2235;border-left:3px solid ${c};margin:4px 4px 0 0">${it.hour?it.hour+' ':''}${it.title} · ${STATUS_LABEL[it.status]||''}</span>`);
-    });
-    if(r.blocker) chips.push(`<span style="display:inline-block;font-size:12px;font-weight:600;padding:3px 9px;border-radius:20px;background:#221012;color:#ef8f8f;border:1px solid #4a2020;margin:4px 4px 0 0">🚨 블로커 · ${r.blocker}</span>`);
-    box.innerHTML = `<div style="border-top:1px solid #252836;margin-top:12px;padding-top:12px">
-      <div class="page-sub" style="margin-bottom:6px">정리 결과 — 확인 후 적용(타임테이블·목표·블로커에 반영):</div>
-      <div>${chips.join('')||'<span class="page-sub">분류할 항목을 못 찾았어요. 쉼표로 나눠 다시 써보세요.</span>'}</div>
-      <div style="text-align:right;margin-top:10px"><button class="btn btn-primary" onclick="applyOrganize('${uid}')">이대로 적용</button></div>
-    </div>`;
+    const text=$('brain-dump')?.value||''; const box=$('organize-preview'); if(!box) return;
+    if(!text.trim()){ box.innerHTML='<div class="muted" style="margin-top:8px">먼저 위 칸에 적어주세요.</div>'; pendingOrganize=null; return; }
+    const r=autoOrganize(text); pendingOrganize=r;
+    const chips=r.items.map(it=>`<span class="chip">${it.hour?it.hour+' ':''}${esc(it.title)} · ${STATUS_LABEL[it.status]||''}</span>`);
+    if(r.blocker) chips.push(`<span class="chip chip-bad">막힘 · ${esc(r.blocker)}</span>`);
+    box.innerHTML=`<div style="margin-top:10px"><div class="muted" style="margin-bottom:6px">이렇게 항목으로 추가할게요:</div>${chips.join('')||'<span class="muted">분류할 항목을 못 찾았어요.</span>'}<div class="row" style="justify-content:flex-end;margin-top:8px"><button class="btn btn-primary" onclick="applyOrganize('${uid}')">추가</button></div></div>`;
   };
-
   window.applyOrganize = async (uid) => {
-    if(!pendingOrganize) return;
-    const dateStr = today();
-    const ws = weekStart(new Date(dateStr));
-    const hrs = hoursRange((userProfile&&userProfile.workStart)||DEFAULT_START,(userProfile&&userProfile.workEnd)||DEFAULT_END);
-    const used = new Set(pendingOrganize.items.filter(i=>i.hour).map(i=>i.hour));
-    let freeIdx = 0; const writes = [];
+    if(!pendingOrganize) return; const dateStr=today();
+    const writes=[];
     for(const it of pendingOrganize.items){
-      let hour = it.hour;
-      if(!hour){ while(freeIdx<hrs.length && used.has(hrs[freeIdx])) freeIdx++; if(freeIdx>=hrs.length) continue; hour=hrs[freeIdx]; used.add(hour); freeIdx++; }
-      const slotId = `${uid}_${dateStr}_${hour.replace(':','')}`;
-      writes.push(setDoc(doc(db,"slots",slotId), { uid, date:dateStr, hour, title:it.title, status:it.status, weekStart:ws, updatedAt:Timestamp.now() }, {merge:true}));
+      const id=`${uid}_${dateStr}_${newKey()}`;
+      const payload={ uid, date:dateStr, title:it.title, status:it.status==='blocker'?'todo':it.status, important:false, plannedTime:it.hour||'', weekStart:weekStart(new Date(dateStr)), updatedAt:Timestamp.now() };
+      writes.push(setDoc(doc(db,"slots",id),payload,{merge:true})); todayTasks.push({id,...payload});
     }
-    if(pendingOrganize.goals.length) writes.push(setDoc(doc(db,"daily",`${uid}_${dateStr}`), { uid, date:dateStr, topGoals:pendingOrganize.goals, updatedAt:Timestamp.now() }, {merge:true}));
-    if(pendingOrganize.blocker) writes.push(setDoc(doc(db,"daily",`${uid}_${dateStr}`), { uid, date:dateStr, blocker:pendingOrganize.blocker, updatedAt:Timestamp.now() }, {merge:true}));
+    if(pendingOrganize.blocker) writes.push(setDoc(doc(db,"daily",`${uid}_${dateStr}`),{uid,date:dateStr,blocker:pendingOrganize.blocker,updatedAt:Timestamp.now()},{merge:true}));
     await Promise.all(writes);
-    if($('brain-dump')) $('brain-dump').value='';
-    if($('organize-preview')) $('organize-preview').innerHTML='<div class="page-sub" style="margin-top:10px;color:#22c55e">✓ 적용됐어요. 타임테이블·목표·블로커를 확인하세요.</div>';
-    loadTodaySlots(uid, dateStr);
-    loadDailyReport(uid, dateStr);
-    pendingOrganize = null;
+    if($('brain-dump')) $('brain-dump').value=''; if($('organize-preview')) $('organize-preview').innerHTML='<div class="ontime" style="margin-top:8px">✓ 추가됐어요.</div>';
+    if(pendingOrganize.blocker && $('blocker-input')) $('blocker-input').value=pendingOrganize.blocker;
+    pendingOrganize=null; renderTaskList(uid);
   };
 
-  // ──────────────────────────────────────────
-  // ── 상사 뷰
-  // ──────────────────────────────────────────
-  async function renderBossView() {
-    if($('sidebar')) $('sidebar').style.display = ''; // 관리자만 직원목록 사이드바
-    const main = $('main-content');
-    main.innerHTML = '<div class="loading">직원 목록 불러오는 중...</div>';
+  // ── 필수 업무(루틴) ──
+  window.toggleGuide = (id) => { const g=$(id); if(g) g.style.display=g.style.display==='none'?'block':'none'; };
+  async function loadRoutinesChecklist(uid, containerId, dateStr){
+    const box=$(containerId); if(!box) return;
+    const canManage=(currentUser&&currentUser.uid===uid)||userRole==='boss';
+    const [rSnap,dSnap]=await Promise.all([getDocs(collection(db,"routines")),getDoc(doc(db,"daily",`${uid}_${dateStr}`))]);
+    const routines=[]; rSnap.forEach(r=>{const d=r.data(); if(d.active!==false&&(d.targetUid==='all'||d.targetUid===uid)) routines.push({id:r.id,...d});});
+    routines.sort((a,b)=>(a.title||'').localeCompare(b.title||''));
+    const done=new Set(((dSnap.exists()?dSnap.data().routinesDone:[])||[]));
+    const manage=canManage?`<span class="link-btn" onclick="openRoutineManager('${uid}')">관리</span>`:'';
+    if(!routines.length){ box.innerHTML=`<div class="soft-card"><div class="row-between"><span class="sec-title">필수 업무</span>${manage}</div><div class="muted" style="margin-top:6px">아직 등록된 필수 업무가 없어요.</div></div>`; return; }
+    const doneN=routines.filter(r=>done.has(r.id)).length;
+    let html=`<div class="soft-card"><div class="row-between"><span class="sec-title">필수 업무 <span class="muted">· ${doneN}/${routines.length} · 매일 리셋</span></span>${manage}</div>`;
+    routines.forEach(r=>{ const on=done.has(r.id); const gid='g_'+r.id;
+      html+=`<div class="rt-row">
+        <span class="rt-check ${on?'on':''}" onclick="toggleRoutineDone('${uid}','${r.id}')">${on?'✓':''}</span>
+        <div style="flex:1">
+          <div class="row-between"><span class="rt-title ${on?'done':''}">${esc(r.title)}${r.targetUid!=='all'?' <span class="muted">· 개인</span>':''}</span>${(r.guide||'').trim()?`<span class="link-btn" onclick="toggleGuide('${gid}')">방법 ▾</span>`:''}</div>
+          ${(r.guide||'').trim()?`<div id="${gid}" class="rt-guide" style="display:none">${esc(r.guide)}</div>`:''}
+        </div></div>`;
+    });
+    box.innerHTML=html+`</div>`;
+  }
+  window.toggleRoutineDone = async (uid, rid) => {
+    const dateStr=today(); const ref=doc(db,"daily",`${uid}_${dateStr}`); const snap=await getDoc(ref);
+    const cur=new Set(((snap.exists()?snap.data().routinesDone:[])||[])); cur.has(rid)?cur.delete(rid):cur.add(rid);
+    await setDoc(ref,{uid,date:dateStr,routinesDone:[...cur],updatedAt:Timestamp.now()},{merge:true});
+    loadRoutinesChecklist(uid,'routines-box',dateStr);
+  };
+  window.openRoutineManager = async (uid) => {
+    const boss=userRole==='boss'; const rSnap=await getDocs(collection(db,"routines"));
+    const list=[]; rSnap.forEach(r=>{const d=r.data(); if(boss||d.createdBy===currentUser.uid) list.push({id:r.id,...d});});
+    list.sort((a,b)=>(a.title||'').localeCompare(b.title||''));
+    let staffList=[], targetOpts=`<option value="${boss?'all':currentUser.uid}">${boss?'전 직원 공통':'나만'}</option>`;
+    if(boss){ const us=await getDocs(query(collection(db,"users"),where("role","==","staff"))); us.forEach(u=>staffList.push({uid:u.id,name:u.data().displayName||u.id})); targetOpts+=staffList.map(s=>`<option value="${s.uid}">${esc(s.name)}만</option>`).join(''); }
+    const nameOf=(t)=>t==='all'?'전체':(staffList.find(s=>s.uid===t)?.name||(t===currentUser.uid?'나':'개인'));
+    showModal(`
+      <div class="modal-title">필수 업무 관리</div>
+      <div class="form-group"><label>제목</label><input id="rt-title" class="mini-input" style="width:100%" placeholder="예: 오픈 점검"></div>
+      ${boss?`<div class="form-group"><label>대상</label><select id="rt-target" class="mini-input" style="width:100%">${targetOpts}</select></div>`:`<input type="hidden" id="rt-target" value="${currentUser.uid}">`}
+      <div class="form-group"><label>작업 절차 (SOP) — 단계별 방법 (선택)</label><textarea id="rt-guide" class="ta" style="height:90px" placeholder="1. ...&#10;2. ...&#10;3. ..."></textarea></div>
+      <div style="text-align:right"><button class="btn btn-primary" onclick="saveRoutine('${uid}')">＋ 추가</button></div>
+      <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:12px">
+        <div class="muted" style="margin-bottom:6px">등록됨 (${list.length})</div>
+        ${list.length?list.map(r=>`<div class="row-between" style="padding:6px 0;border-bottom:1px solid var(--border)"><span>${esc(r.title)} <span class="muted">· ${esc(nameOf(r.targetUid))}</span></span><button class="btn btn-danger" onclick="deleteRoutine('${r.id}','${uid}')">삭제</button></div>`).join(''):'<div class="muted">아직 없음</div>'}
+      </div>
+      <div class="modal-footer"><button class="btn btn-ghost" onclick="closeModal()">닫기</button></div>`);
+  };
+  window.saveRoutine = async (uid) => {
+    const title=$('rt-title')?.value.trim(); if(!title){ alert('제목을 입력하세요'); return; }
+    const tgt=(userRole==='boss')?($('rt-target')?.value||'all'):currentUser.uid; const guide=$('rt-guide')?.value.trim()||'';
+    await addDoc(collection(db,"routines"),{title,guide,targetUid:tgt,createdBy:currentUser.uid,active:true,createdAt:Timestamp.now()});
+    openRoutineManager(uid); if($('routines-box')) loadRoutinesChecklist(uid,'routines-box',today());
+  };
+  window.deleteRoutine = async (rid, uid) => { if(!confirm('삭제할까요?')) return; await deleteDoc(doc(db,"routines",rid)); openRoutineManager(uid); if($('routines-box')) loadRoutinesChecklist(uid,'routines-box',today()); };
 
-    const q = query(collection(db,"users"), where("role","==","staff"));
-    const snap = await getDocs(q);
-    const staffList = [];
-    snap.forEach(d=>staffList.push({uid:d.id,...d.data()}));
+  // ── 주간 타임테이블(보조) ──
+  async function renderWeekTimetable(uid, containerId, hoursArr){
+    const HRS=(hoursArr&&hoursArr.length)?hoursArr:HOURS; const ws=weekStart(); const wrap=$(containerId);
+    wrap.innerHTML='<div class="sec-title" style="margin-bottom:10px">이번 주 타임테이블 <span class="muted">· 칸을 눌러 시간별 업무를 넣어요</span></div>';
+    const grid=el('div','week-grid'); const hdr=el('div','week-header-row');
+    hdr.innerHTML='<div class="time-col-hdr"></div>'+DAYS.map((d,i)=>{const date=new Date(ws);date.setDate(date.getDate()+i);const ds=date.toISOString().slice(0,10);const isT=ds===today();return `<div class="day-hdr${isT?' today':''}">${d}<br><span class="day-date">${date.getMonth()+1}/${date.getDate()}</span></div>`;}).join('');
+    grid.appendChild(hdr);
+    for(const hour of HRS){ const row=el('div','week-row'); row.innerHTML=`<div class="time-col">${hour}</div>`;
+      for(let i=0;i<5;i++){ const date=new Date(ws);date.setDate(date.getDate()+i);const ds=date.toISOString().slice(0,10);const isT=ds===today();const cell=el('div','week-cell'+(isT?' today-col':'')); cell.dataset.date=ds; cell.dataset.hour=hour; cell.dataset.uid=uid; cell.addEventListener('click',()=>openSlotModal(uid,ds,hour,cell)); row.appendChild(cell); }
+      grid.appendChild(row); }
+    wrap.appendChild(grid);
+    const q=query(collection(db,"slots"),where("uid","==",uid),where("weekStart","==",ws));
+    const snap=await getDocs(q);
+    snap.forEach(d=>{ const s=d.data(); const cell=wrap.querySelector(`[data-date="${s.date}"][data-hour="${s.plannedTime||s.hour}"]`); if(cell) renderCellContent(cell,s); });
+  }
+  function renderCellContent(cell,s){
+    cell.innerHTML=''; if(!s||!s.title){ cell.classList.remove('has-data'); return; } cell.classList.add('has-data');
+    const chip=el('div','slot-chip'); chip.style.borderLeftColor=SVAR[s.status]||'var(--text-3)';
+    const badge=(s.needsHelp&&!s.helpResolved?' 🆘':'')+((s.links||[]).length?` 🔗${s.links.length}`:'');
+    chip.innerHTML=`<div class="slot-title">${esc(s.title)}${badge}</div><div class="slot-status" style="color:${SVAR[s.status]}">${STATUS_LABEL[s.status]||''}</div>`;
+    cell.appendChild(chip);
+  }
+  function openSlotModal(uid, date, hour, cellEl){
+    const isOwner=currentUser.uid===uid, isBoss=userRole==='boss'; if(!isOwner&&!isBoss) return;
+    const slotId=`${uid}_${date}_${hour.replace(':','')}`;
+    getDoc(doc(db,"slots",slotId)).then(snap=>{ const d=snap.exists()?snap.data():{};
+      showModal(`
+        <div class="modal-title">시간별 업무 — ${date} ${hour}</div>
+        <div class="form-group"><label>업무 내용</label><input id="s-title" class="mini-input" style="width:100%" value="${esc(d.title)}"></div>
+        <div class="form-group"><label>상태</label><div class="seg-group modal-seg">${['done','wip','todo'].map(k=>`<button class="seg" data-s="${k}">${k==='todo'?'미완':STATUS_LABEL[k]}</button>`).join('')}</div></div>
+        <div class="form-group"><label>메모 (선택)</label><textarea id="s-memo" class="ta">${esc(d.memo)}</textarea></div>
+        <div class="form-group"><label>🔗 관련 링크</label><div id="s-links"></div><button type="button" class="btn btn-ghost" style="margin-top:6px" onclick="addLinkRow()">＋ 링크</button></div>
+        ${isOwner?`<div class="form-group help-box"><label class="row" style="gap:6px;cursor:pointer"><input type="checkbox" id="s-help" ${d.needsHelp&&!d.helpResolved?'checked':''}> 🆘 관리자에게 도움요청</label><input id="s-help-note" class="mini-input" style="width:100%;margin-top:6px" placeholder="어디가 어려운지 (선택)" value="${esc(d.helpNote)}"></div>`:''}
+        ${isBoss&&!isOwner?`<div class="form-group"><label>관리자 코멘트</label><textarea id="s-comment" class="ta">${esc(d.bossComment)}</textarea></div>`:''}
+        <div class="modal-footer">${d.title?`<button class="btn btn-danger" id="slot-del">삭제</button>`:''}<button class="btn btn-ghost" onclick="closeModal()">취소</button><button class="btn btn-primary" id="slot-save">저장</button></div>`);
+      let selStatus=d.status||'todo';
+      document.querySelectorAll('.modal-seg .seg').forEach(b=>{ if(b.dataset.s===selStatus) b.classList.add('on','seg-'+selStatus); b.addEventListener('click',()=>{ selStatus=b.dataset.s; document.querySelectorAll('.modal-seg .seg').forEach(x=>x.className='seg'); b.classList.add('on','seg-'+selStatus); }); });
+      (d.links||[]).forEach(l=>addLinkRow(l.label,l.url)); if(!(d.links&&d.links.length)) addLinkRow();
+      $('slot-save').onclick=async()=>{ const title=$('s-title').value.trim(); if(!title){alert('업무 내용을 입력하세요');return;}
+        const links=[...document.querySelectorAll('#s-links .link-edit')].map(r=>({label:r.querySelector('.link-label').value.trim(),url:r.querySelector('.link-url').value.trim()})).filter(l=>isValidUrl(l.url));
+        const payload={uid,date,hour,plannedTime:hour,title,status:selStatus,memo:$('s-memo').value.trim(),links,weekStart:weekStart(new Date(date)),updatedAt:Timestamp.now()};
+        if($('s-help')){ payload.needsHelp=$('s-help').checked; payload.helpNote=$('s-help-note').value.trim(); }
+        if($('s-comment')) payload.bossComment=$('s-comment').value.trim();
+        await setDoc(doc(db,"slots",slotId),payload,{merge:true});
+        renderCellContent(cellEl,payload); closeModal();
+        if(isOwner && date===today() && $('task-list')) loadTodayTasks(uid,today());
+      };
+      if($('slot-del')) $('slot-del').onclick=async()=>{ if(!confirm('삭제할까요?'))return; await deleteDoc(doc(db,"slots",slotId)); renderCellContent(cellEl,null); closeModal(); if(date===today()&&$('task-list')) loadTodayTasks(uid,today()); };
+    });
+  }
 
-    // 사이드바 렌더
-    const sidebar = $('sidebar');
-    sidebar.innerHTML = '<div class="sidebar-section">직원 목록</div>';
+  // ── 지난 기록 ──
+  async function renderHistory(uid, containerId){
+    const box=$(containerId); if(!box) return;
+    box.innerHTML='<div class="sec-title" style="margin-bottom:10px">지난 기록 <span class="muted">· 최근순 · 최대 3개월</span></div><div class="muted">불러오는 중...</div>';
+    const snap=await getDocs(query(collection(db,"daily"),where("uid","==",uid)));
+    const days=[]; snap.forEach(d=>days.push(d.data())); days.sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+    box.innerHTML='<div class="sec-title" style="margin-bottom:10px">지난 기록 <span class="muted">· 최근순 · 최대 3개월</span></div>';
+    if(!days.length){ box.innerHTML+='<div class="empty">아직 기록이 없습니다</div>'; return; }
+    const listWrap=el('div','soft-card');
+    days.forEach(d=>{ const goals=d.topGoals||[]; const gd=goals.filter(g=>g.done).length;
+      const row=el('div','hist-row'); row.onclick=()=>openDayDetail(uid,d.date);
+      row.innerHTML=`<span><b>${dateLabel(d.date||'')}</b> <span class="muted">★ ${gd}/${goals.length}${d.clockIn?' · 출근 '+d.clockIn:''}${(d.blocker||'').trim()?' · 🆘':''}</span></span><span class="muted">${d.selfFeedback?esc(d.selfFeedback.slice(0,26)):''} ▸</span>`;
+      listWrap.appendChild(row); });
+    box.appendChild(listWrap); const detail=el('div'); detail.id='history-detail'; box.appendChild(detail);
+  }
+  window.openDayDetail = async (uid, date) => {
+    const box=$('history-detail'); if(!box) return; box.innerHTML='<div class="muted">불러오는 중...</div>';
+    const sn=await getDocs(query(collection(db,"slots"),where("uid","==",uid),where("date","==",date)));
+    const slots=[]; sn.forEach(x=>slots.push(x.data())); slots.sort((a,b)=>((a.plannedTime||a.hour||'')+'').localeCompare((b.plannedTime||b.hour||'')+''));
+    const dSnap=await getDoc(doc(db,"daily",`${uid}_${date}`)); const dd=dSnap.exists()?dSnap.data():{};
+    box.innerHTML=`<div class="soft-card" style="margin-top:12px"><div class="sec-title">${dateLabel(date)} 상세</div>`+
+      (slots.length?slots.map(s=>`<div class="task-row static"><div class="task-main"><div class="task-title">${esc(s.title||'')} <span style="color:${SVAR[s.status]}">${STATUS_LABEL[s.status]||''}</span>${s.important?' ★':''}</div>${(s.links||[]).length?`<div class="task-links">${linkPills(s.links)}</div>`:''}</div></div>`).join(''):'<div class="empty">그날 항목 없음</div>')+
+      `<div class="fld" style="margin-top:12px">중요 업무</div><div class="fbox">${(dd.topGoals||[]).map(g=>`${g.done?'✅':'⬜'} ${esc(g.text)}`).join('<br>')||'(없음)'}</div>`+
+      `<div class="fld" style="margin-top:12px">자체 피드백</div><div class="fbox">${esc(dd.selfFeedback)||'(없음)'}</div>`+
+      (dd.improve?`<div class="fld" style="margin-top:12px">배운 점/개선점</div><div class="fbox">${esc(dd.improve)}</div>`:'')+
+      (dd.tomorrowDetail?`<div class="fld" style="margin-top:12px">내일 계획</div><div class="fbox">${esc(dd.tomorrowDetail)}</div>`:'')+`</div>`;
+  };
+  window.bossShowHistory = (uid) => renderHistory(uid,'boss-history-wrap');
 
-    // 상태 뱃지 계산 (오늘 입력 여부)
-    const dateStr = today();
-    for(const s of staffList) {
-      const q2 = query(collection(db,"slots"),where("uid","==",s.uid),where("date","==",dateStr));
-      const sn = await getDocs(q2);
-      const hasInput = !sn.empty;
-
-      const item = el('div','staff-item');
-      item.dataset.uid = s.uid;
-      item.innerHTML = `
-        <div class="staff-avatar" style="background:${s.color||'#5b8af0'}">${(s.displayName||'?')[0]}</div>
-        <div class="staff-name">${s.displayName||s.email}</div>
-        <div class="staff-status ${hasInput?'status-ok':'status-none'}"></div>
-      `;
-      item.addEventListener('click', ()=>selectStaff(s, staffList));
-      sidebar.appendChild(item);
+  // ══════════════════════════════════════
+  //  관리자 뷰
+  // ══════════════════════════════════════
+  async function renderBossView(){
+    if($('sidebar')) $('sidebar').style.display='';
+    const main=$('main-content'); main.innerHTML='<div class="muted" style="padding:40px">직원 목록 불러오는 중...</div>';
+    const snap=await getDocs(query(collection(db,"users"),where("role","==","staff")));
+    const staffList=[]; snap.forEach(d=>staffList.push({uid:d.id,...d.data()}));
+    const sidebar=$('sidebar'); sidebar.innerHTML='<div class="sidebar-section">직원 목록</div>';
+    const dateStr=today();
+    for(const s of staffList){
+      const sn=await getDocs(query(collection(db,"slots"),where("uid","==",s.uid),where("date","==",dateStr)));
+      const item=el('div','staff-item'); item.dataset.uid=s.uid;
+      item.innerHTML=`<div class="staff-avatar" style="background:${s.color||'#4f6bed'}">${(s.displayName||'?')[0]}</div><div class="staff-name">${s.displayName||s.email}</div><div class="staff-status ${sn.empty?'status-none':'status-ok'}"></div>`;
+      item.addEventListener('click',()=>selectStaff(s,staffList)); sidebar.appendChild(item);
     }
-
-    // 전체 보기 버튼
-    const all = el('div','view-all');
-    all.innerHTML = '📊 팀 전체 보기';
-    all.addEventListener('click', ()=>renderTeamOverview(staffList));
-    sidebar.appendChild(all);
-
-    // 기본: 첫 직원
-    if(staffList.length>0) selectStaff(staffList[0], staffList);
-    else main.innerHTML = '<div class="empty-state">등록된 직원이 없습니다</div>';
+    const all=el('div','view-all','📊 팀 전체 보기'); all.addEventListener('click',()=>renderTeamOverview(staffList)); sidebar.appendChild(all);
+    if(staffList.length>0) selectStaff(staffList[0],staffList); else main.innerHTML='<div class="empty">등록된 직원이 없습니다</div>';
   }
-
-  function selectStaff(s, staffList) {
-    selectedStaffUid = s.uid;
-    document.querySelectorAll('.staff-item').forEach(i=>i.classList.toggle('active',i.dataset.uid===s.uid));
-    renderBossStaffDetail(s);
-  }
-
-  function renderBossStaffDetail(s) {
-    unsubListeners.forEach(u=>u()); unsubListeners=[];
-    const main = $('main-content');
-    main.innerHTML = `
+  let _curStaff=null;
+  function selectStaff(s, staffList){ selectedStaffUid=s.uid; document.querySelectorAll('.staff-item').forEach(i=>i.classList.toggle('active',i.dataset.uid===s.uid)); renderBossStaffDetail(s); }
+  function renderBossStaffDetail(s){
+    _curStaff=s;
+    unsubListeners.forEach(u=>u()); unsubListeners=[]; const main=$('main-content');
+    main.innerHTML=`
       <div class="page-header">
-        <div style="display:flex;align-items:center;gap:12px">
-          <div class="staff-header-avatar" style="background:${s.color||'#5b8af0'}">${(s.displayName||'?')[0]}</div>
-          <div>
-            <div class="page-title">${s.displayName||s.email}</div>
-            <div class="page-sub" id="staff-meta">로딩 중...</div>
-          </div>
-        </div>
-        <div style="display:flex;gap:8px">
-          <button class="btn btn-outline" onclick="openAddTaskModal('${s.uid}','${s.displayName||s.email}')">📎 업무 배정</button>
-          <button class="btn btn-outline" onclick="openRoutineManager('${s.uid}')">🧩 필수 업무</button>
-          <button class="btn btn-primary" onclick="openBossCommentModal('${s.uid}','${s.displayName||s.email}')">💬 지시 보내기</button>
-          <button class="btn btn-outline" onclick="bossShowHistory('${s.uid}')">🗂 지난 기록</button>
+        <div class="row" style="gap:12px"><div class="staff-header-avatar" style="background:${s.color||'#4f6bed'}">${(s.displayName||'?')[0]}</div><div><div class="page-title">${s.displayName||s.email}</div><div class="page-sub" id="staff-meta">로딩 중...</div></div></div>
+        <div class="row" style="gap:8px">
+          <button class="btn btn-ghost" onclick="openAddTaskModal('${s.uid}','${esc(s.displayName||s.email)}')">＋ 업무 배정</button>
+          <button class="btn btn-ghost" onclick="openRoutineManager('${s.uid}')">필수 업무</button>
+          <button class="btn btn-primary" onclick="openBossCommentModal('${s.uid}','${esc(s.displayName||s.email)}')">지시 보내기</button>
+          <button class="btn btn-ghost" onclick="bossShowHistory('${s.uid}')">지난 기록</button>
         </div>
       </div>
       <div id="boss-history-wrap"></div>
-      <div id="boss-week-wrap"></div>
-      <div class="two-col" style="margin-top:20px">
-        <div id="boss-today-slots"></div>
-        <div id="boss-feedback-wrap"></div>
-      </div>
-    `;
-    renderWeekTimetable(s.uid, 'boss-week-wrap', hoursRange(s.workStart, s.workEnd));
+      <div class="two-col" style="margin-top:8px"><div id="boss-today-slots"></div><div id="boss-feedback-wrap"></div></div>
+      <div id="boss-week-wrap" style="margin-top:20px"></div>`;
     loadBossTodayView(s);
+    renderWeekTimetable(s.uid,'boss-week-wrap',hoursRange(s.workStart,s.workEnd));
   }
-
-  async function loadBossTodayView(s) {
-    const dateStr = today();
-    const slotsQ = query(collection(db,"slots"),where("uid","==",s.uid),where("date","==",dateStr));
-    const dailyRef = doc(db,"daily",`${s.uid}_${dateStr}`);
-
-    // 메타
-    const sn = await getDocs(slotsQ);
-    let done=0,total=0;
-    sn.forEach(d=>{total++;if(d.data().status==='done')done++;});
-    const metaSnap = await getDoc(dailyRef);
-    const md = metaSnap.exists()?metaSnap.data():{};
-    const mli = lateInfo(md.clockIn, s.workStart);
-    const att = md.clockIn ? `출근 ${md.clockIn}${mli.late?` · 지각 ${mli.mins}분`:' · 정상'}${md.clockOut?` · 퇴근 ${md.clockOut}`:''}` : '미출근';
-    // 필수업무 완료 현황
-    let rtTxt = '';
-    try {
-      const rSnap = await getDocs(collection(db,"routines"));
-      let rTot=0; const doneSet=new Set(md.routinesDone||[]); let rDone=0;
-      rSnap.forEach(r=>{ const d=r.data(); if(d.active!==false && (d.targetUid==='all'||d.targetUid===s.uid)){ rTot++; if(doneSet.has(r.id)) rDone++; } });
-      if(rTot>0) rtTxt = ` · 필수업무 ${rDone}/${rTot}`;
-    } catch(e){}
-    const meta = $('staff-meta');
-    if(meta) meta.textContent = `오늘 완료 ${done}/${total}건${rtTxt} · ${att}`;
-
-    // 슬롯 목록
-    const slotsWrap = $('boss-today-slots');
-    if(slotsWrap) {
-      slotsWrap.innerHTML = '<div class="card-title"><span class="dot" style="background:#22c55e"></span> 오늘 시간별 업무</div>';
-      sn.forEach(d=>{
-        const sl = d.data();
-        const row = el('div','today-slot-row');
-        row.innerHTML = `
-          <div class="slot-time">${sl.hour}</div>
-          <div class="slot-body">
-            <div class="slot-name">${sl.title}${sl.needsHelp?' <span style="color:#f59e0b;font-size:11px">🆘</span>':''}</div>
-            ${sl.memo?`<div class="slot-memo">${sl.memo}</div>`:''}
-            ${sl.needsHelp?`<div style="color:#f59e0b;font-size:11px;margin-top:2px">🆘 도움요청${sl.helpNote?': '+esc(sl.helpNote):''}</div>`:''}
-            ${(sl.links||[]).length?`<div style="margin-top:4px">${linkPills(sl.links)}</div>`:''}
-          </div>
-          <div class="slot-st" style="color:${STATUS_COLOR[sl.status]}">${STATUS_LABEL[sl.status]||''}</div>
-          <div style="display:flex;gap:4px;margin-left:8px">
-            <button class="btn-sm btn-approve" onclick="approveSlot('${d.id}',true)">승인</button>
-            <button class="btn-sm btn-return" onclick="approveSlot('${d.id}',false)">반려</button>
-          </div>
-        `;
-        slotsWrap.appendChild(row);
-      });
+  async function loadBossTodayView(s){
+    const dateStr=today(); const slotsQ=query(collection(db,"slots"),where("uid","==",s.uid),where("date","==",dateStr)); const dailyRef=doc(db,"daily",`${s.uid}_${dateStr}`);
+    const sn=await getDocs(slotsQ); let done=0,total=0; const slots=[]; sn.forEach(d=>{const sd=d.data(); slots.push({id:d.id,...sd}); total++; if(sd.status==='done')done++;});
+    slots.sort(sortTasks);
+    const md=(await getDoc(dailyRef)).data()||{};
+    const mli=lateInfo(md.clockIn,s.workStart);
+    const att=md.clockIn?`출근 ${md.clockIn}${mli.late?` · 지각 ${mli.mins}분`:' · 정상'}${md.clockOut?` · 퇴근 ${md.clockOut}`:''}`:'미출근';
+    let rtTxt=''; try{ const rSnap=await getDocs(collection(db,"routines")); let rTot=0,rDone=0; const ds=new Set(md.routinesDone||[]); rSnap.forEach(r=>{const d=r.data(); if(d.active!==false&&(d.targetUid==='all'||d.targetUid===s.uid)){rTot++; if(ds.has(r.id))rDone++;}}); if(rTot>0) rtTxt=` · 필수업무 ${rDone}/${rTot}`; }catch(e){}
+    const meta=$('staff-meta'); if(meta) meta.textContent=`오늘 완료 ${done}/${total}${rtTxt} · ${att}`;
+    const wrap=$('boss-today-slots');
+    if(wrap){ wrap.innerHTML='<div class="soft-card"><div class="sec-title">오늘 할 일</div>'+
+      (slots.length?slots.map(sl=>`<div class="task-row static ${sl.status==='done'?'task-done':''}">
+        <span class="star">${sl.important?'★':''}</span>
+        <div class="task-main"><div class="task-title">${esc(sl.title)}${sl.carriedFrom?' <span class="pill pill-carry">이월</span>':''}${sl.needsHelp&&!sl.helpResolved?' <span class="pill pill-help">도움요청</span>':''}</div>${(sl.plannedTime||sl.hour)?`<span class="task-meta">${sl.plannedTime||sl.hour}</span>`:''}${sl.memo?`<div class="task-meta">${esc(sl.memo)}</div>`:''}${sl.helpNote&&sl.needsHelp?`<div class="help-note">🆘 ${esc(sl.helpNote)}</div>`:''}${(sl.links||[]).length?`<div class="task-links">${linkPills(sl.links)}</div>`:''}</div>
+        <span class="badge" style="color:${SVAR[sl.status]}">${STATUS_LABEL[sl.status]||''}</span>
+        <div class="row" style="gap:4px;margin-left:6px"><button class="btn-sm btn-approve" onclick="approveSlot('${sl.id}',true)">승인</button><button class="btn-sm btn-return" onclick="approveSlot('${sl.id}',false)">반려</button></div>
+      </div>`).join(''):'<div class="empty">오늘 항목 없음</div>')+'</div>';
     }
-
-    // 피드백
-    const dSnap = await getDoc(dailyRef);
-    const dData = dSnap.exists()?dSnap.data():{};
-    const fbWrap = $('boss-feedback-wrap');
-    if(fbWrap) {
-      fbWrap.innerHTML = `
-        <div class="card">
-          <div class="card-title"><span class="dot" style="background:#22c55e"></span> 오늘의 핵심목표</div>
-          <div class="feedback-box">${(dData.topGoals||[]).map(g=>`${g.done?'✅':'⬜'} ${g.text}`).join('<br>')||'(아직 없음)'}</div>
-          ${(dData.blocker||'').trim()?`<div class="card-title" style="margin-top:16px"><span class="dot" style="background:#ef4444"></span> 블로커 (도움요청)</div><div class="feedback-box" style="border-color:#4a2020;color:#ef8f8f">${dData.blocker}</div>`:''}
-          <div class="card-title" style="margin-top:16px"><span class="dot" style="background:#f59e0b"></span> 자체 피드백</div>
-          <div class="feedback-box">${dData.selfFeedback||'(아직 입력하지 않음)'}</div>
-          ${dData.improve?`<div class="card-title" style="margin-top:16px"><span class="dot" style="background:#8fb0f0"></span> 배운 점/개선점</div><div class="feedback-box">${esc(dData.improve)}</div>`:''}
-          <div class="card-title" style="margin-top:16px"><span class="dot" style="background:#5b8af0"></span> 내일 업무 계획</div>
-          <div class="feedback-box">${(dData.tomorrowTasks||[]).map((t,i)=>`${i+1}. ${t}`).join('<br>')||'(아직 입력하지 않음)'}</div>
-          <div class="card-title" style="margin-top:16px"><span class="dot" style="background:#7ab040"></span> 관리자 코멘트 달기</div>
-          <textarea id="boss-comment-input" class="form-textarea" placeholder="직원에게 코멘트를 남기세요" style="height:80px">${dData.bossComment||''}</textarea>
-          <div style="text-align:right;margin-top:8px">
-            <button class="btn btn-primary" onclick="saveBossComment('${s.uid}','${dateStr}')">코멘트 저장</button>
-          </div>
-        </div>
-      `;
+    const dData=(await getDoc(dailyRef)).data()||{};
+    const fb=$('boss-feedback-wrap');
+    if(fb){ fb.innerHTML=`<div class="soft-card">
+      <div class="sec-title">중요 업무</div><div class="fbox">${(dData.topGoals||[]).map(g=>`${g.done?'✅':'⬜'} ${esc(g.text)}`).join('<br>')||'(아직 없음)'}</div>
+      ${(dData.blocker||'').trim()?`<div class="fld danger" style="margin-top:14px">막힌 것 (도움요청)</div><div class="fbox danger">${esc(dData.blocker)}</div>`:''}
+      <div class="fld" style="margin-top:14px">자체 피드백</div><div class="fbox">${esc(dData.selfFeedback)||'(아직 입력하지 않음)'}</div>
+      ${dData.improve?`<div class="fld" style="margin-top:14px">배운 점/개선점</div><div class="fbox">${esc(dData.improve)}</div>`:''}
+      <div class="fld" style="margin-top:14px">내일 계획</div><div class="fbox">${esc(dData.tomorrowDetail)||(dData.tomorrowTasks||[]).map((t,i)=>`${i+1}. ${esc(t)}`).join('<br>')||'(아직 입력하지 않음)'}</div>
+      <div class="fld" style="margin-top:14px">관리자 코멘트</div><textarea id="boss-comment-input" class="ta" placeholder="직원에게 코멘트">${esc(dData.bossComment)}</textarea>
+      <div style="text-align:right;margin-top:8px"><button class="btn btn-primary" onclick="saveBossComment('${s.uid}','${dateStr}')">코멘트 저장</button></div></div>`;
     }
   }
-
   window.approveSlot = async (slotId, approved) => {
-    let reason = '';
-    if(!approved){
-      reason = (prompt('반려 사유를 입력하세요 (직원에게 전달됩니다)')||'').trim();
-      if(!reason){ alert('반려하려면 사유가 필요합니다.'); return; }
-    }
-    const payload = { approved, approvedAt: Timestamp.now(), approvedBy: currentUser.uid };
-    if(!approved) payload.bossComment = '[반려] ' + reason;
-    await setDoc(doc(db,"slots",slotId), payload, {merge:true});
-    alert(approved?'승인했습니다.':'반려했습니다(사유가 직원에게 전달됨).');
+    let reason=''; if(!approved){ reason=(prompt('반려 사유를 입력하세요 (직원에게 전달)')||'').trim(); if(!reason){ alert('반려하려면 사유가 필요합니다.'); return; } }
+    const payload={approved,approvedAt:Timestamp.now(),approvedBy:currentUser.uid}; if(!approved) payload.bossComment='[반려] '+reason;
+    await setDoc(doc(db,"slots",slotId),payload,{merge:true}); alert(approved?'승인했습니다.':'반려했습니다.');
   };
-
-  window.saveBossComment = async (uid, dateStr) => {
-    const comment = $('boss-comment-input')?.value.trim()||'';
-    await setDoc(doc(db,"daily",`${uid}_${dateStr}`),{ bossComment: comment, bossCommentAt: Timestamp.now() },{merge:true});
-    alert('코멘트가 저장되었습니다.');
+  window.saveBossComment = async (uid, dateStr) => { const c=$('boss-comment-input')?.value.trim()||''; await setDoc(doc(db,"daily",`${uid}_${dateStr}`),{bossComment:c,bossCommentAt:Timestamp.now()},{merge:true}); alert('코멘트가 저장되었습니다.'); };
+  window.openAddTaskModal = (uid,name) => {
+    const t=new Date(); t.setDate(t.getDate()+1); const tStr=t.toISOString().slice(0,10);
+    showModal(`<div class="modal-title">업무 배정 — ${name}</div>
+      <div class="form-group"><label>날짜</label><input id="at-date" type="date" class="mini-input" style="width:100%" value="${tStr}"></div>
+      <div class="form-group"><label>예정 시간 (선택)</label><input id="at-time" type="time" class="mini-input" style="width:100%"></div>
+      <div class="form-group"><label>업무 내용</label><input id="at-title" class="mini-input" style="width:100%" placeholder="업무 내용"></div>
+      <div class="form-group"><label>메모 (선택)</label><textarea id="at-memo" class="ta" placeholder="상세 지시사항"></textarea></div>
+      <div class="modal-footer"><button class="btn btn-ghost" onclick="closeModal()">취소</button><button class="btn btn-primary" onclick="saveAddedTask('${uid}')">배정</button></div>`);
   };
-
-  window.openAddTaskModal = (uid, name) => {
-    const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate()+1);
-    const tStr = tomorrow.toISOString().slice(0,10);
-    showModal(`
-      <div class="modal-title">📎 업무 배정 — ${name}</div>
-      <div class="form-group"><label>날짜</label><input id="at-date" type="date" class="form-input" value="${tStr}"></div>
-      <div class="form-group"><label>시간 슬롯</label>
-        <select id="at-hour" class="form-input">${HOURS.map(h=>`<option>${h}</option>`).join('')}</select>
-      </div>
-      <div class="form-group"><label>업무 내용</label><input id="at-title" class="form-input" placeholder="업무 내용"></div>
-      <div class="form-group"><label>메모 (선택)</label><textarea id="at-memo" class="form-textarea" placeholder="상세 지시사항"></textarea></div>
-      <div class="modal-footer">
-        <button class="btn btn-outline" onclick="closeModal()">취소</button>
-        <button class="btn btn-primary" onclick="saveAddedTask('${uid}')">배정</button>
-      </div>
-    `);
-  };
-
   window.saveAddedTask = async (uid) => {
-    const date  = $('at-date').value;
-    const hour  = $('at-hour').value;
-    const title = $('at-title').value.trim();
-    const memo  = $('at-memo').value.trim();
+    const date=$('at-date').value, time=$('at-time').value, title=$('at-title').value.trim(), memo=$('at-memo').value.trim();
     if(!title){ alert('업무 내용을 입력하세요'); return; }
-    const slotId = `${uid}_${date}_${hour.replace(':','')}`;
-    await setDoc(doc(db,"slots",slotId),{
-      uid, date, hour, title, memo, status:'todo',
-      weekStart: weekStart(new Date(date)),
-      assignedBy: currentUser.uid,
-      updatedAt: Timestamp.now()
-    },{merge:true});
-    closeModal();
-    alert('업무가 배정되었습니다.');
+    const id=`${uid}_${date}_${newKey()}`;
+    await setDoc(doc(db,"slots",id),{uid,date,plannedTime:time||'',title,memo,status:'todo',important:false,weekStart:weekStart(new Date(date)),assignedBy:currentUser.uid,updatedAt:Timestamp.now()},{merge:true});
+    closeModal(); alert('업무가 배정되었습니다.'); if(_curStaff && _curStaff.uid===uid) renderBossStaffDetail(_curStaff);
   };
-
-  window.openBossCommentModal = (uid, name) => {
-    showModal(`
-      <div class="modal-title">💬 지시 보내기 — ${name}</div>
-      <div class="form-group"><label>지시 내용</label><textarea id="direct-msg" class="form-textarea" style="height:120px" placeholder="직원에게 전달할 지시사항을 입력하세요"></textarea></div>
-      <div class="modal-footer">
-        <button class="btn btn-outline" onclick="closeModal()">취소</button>
-        <button class="btn btn-primary" onclick="sendDirectMessage('${uid}')">전송</button>
-      </div>
-    `);
+  window.openBossCommentModal = (uid,name) => {
+    showModal(`<div class="modal-title">지시 보내기 — ${name}</div><div class="form-group"><label>지시 내용</label><textarea id="direct-msg" class="ta" style="height:120px" placeholder="직원에게 전달할 지시사항"></textarea></div><div class="modal-footer"><button class="btn btn-ghost" onclick="closeModal()">취소</button><button class="btn btn-primary" onclick="sendDirectMessage('${uid}')">전송</button></div>`);
   };
+  window.sendDirectMessage = async (uid) => { const msg=$('direct-msg')?.value.trim()||''; if(!msg){ alert('내용을 입력하세요'); return; } await setDoc(doc(db,"daily",`${uid}_${today()}`),{bossComment:msg,bossCommentAt:Timestamp.now(),bossCommentBy:currentUser.uid},{merge:true}); closeModal(); alert('지시가 전달되었습니다.'); };
 
-  window.sendDirectMessage = async (uid) => {
-    const msg = $('direct-msg')?.value.trim()||'';
-    if(!msg){ alert('내용을 입력하세요'); return; }
-    const dateStr = today();
-    await setDoc(doc(db,"daily",`${uid}_${dateStr}`),{
-      bossComment: msg, bossCommentAt: Timestamp.now(), bossCommentBy: currentUser.uid
-    },{merge:true});
-    closeModal();
-    alert('지시가 전달되었습니다.');
-  };
-
-  // ── 팀 전체 보기
-  async function renderTeamOverview(staffList) {
+  async function renderTeamOverview(staffList){
     document.querySelectorAll('.staff-item').forEach(i=>i.classList.remove('active'));
-    const main = $('main-content');
-    const dateStr = today();
-    main.innerHTML = `
-      <div class="page-header">
-        <div class="page-title">📊 팀 전체 현황 — ${dateStr}</div>
-      </div>
-      <div id="team-alerts"></div>
-      <div id="team-banner"></div>
-      <div class="team-grid" id="team-grid"></div>
-    `;
-    const grid = $('team-grid');
-    const blockers = [];
-    const helps = [];
-    const alerts = [];
-    for(const s of staffList) {
-      const q = query(collection(db,"slots"),where("uid","==",s.uid),where("date","==",dateStr));
-      const sn = await getDocs(q);
-      let done=0,wip=0,undone=0,helpN=0;
-      sn.forEach(d=>{ const sd=d.data(); const st=sd.status; if(st==='done')done++; else if(st==='wip')wip++; else undone++; if(sd.needsHelp){ helpN++; helps.push({name:s.displayName||s.email, title:sd.title||''}); } });
-      const total = done+wip+undone;
-      const pct = total>0?Math.round(done/total*100):0;
-      const pc = pct>=80?'#22c55e':pct>=50?'#f59e0b':'#ef4444';
-
-      const dSnap = await getDoc(doc(db,"daily",`${s.uid}_${dateStr}`));
-      const dd = dSnap.exists()?dSnap.data():{};
-      const feedback = dd.selfFeedback||'';
-      const li = lateInfo(dd.clockIn, s.workStart);
-      const goals = dd.topGoals||[];
-      const goalsDone = goals.filter(g=>g.done).length;
-      const blocker = (dd.blocker||'').trim();
-      if(blocker && !dd.blockerResolved) blockers.push({name:s.displayName||s.email, text:blocker});
-
-      // 이상신호 자동감지
-      const anom = [];
-      if(dd.clockIn && total===0) anom.push('출근했으나 업무 미기록');
-      const anyMemo = sn.docs.some(x=>(x.data().memo||'').trim());
-      if(total>0 && done===total && !anyMemo && !feedback.trim()) anom.push('전부 완료·근거 없음');
-      try {
-        const dAll = await getDocs(query(collection(db,"daily"),where("uid","==",s.uid)));
-        const daysArr = []; dAll.forEach(x=>daysArr.push(x.data()));
-        daysArr.sort((a,b)=>(b.date||'').localeCompare(a.date||''));
-        const recent3 = daysArr.slice(0,3);
-        if(recent3.length>=3 && recent3.every(day=>{ const g=day.topGoals||[]; return g.length===0 || g.filter(x=>x.done).length < g.length; })) anom.push('목표 3일 연속 미달');
-      } catch(e){}
-      anom.forEach(a=>alerts.push({name:s.displayName||s.email, text:a}));
-
-      const att = dd.clockIn
-        ? `출근 ${dd.clockIn} · ${li.late?`<span style="color:#f59e0b;font-weight:700">지각 ${li.mins}분</span>`:`<span style="color:#22c55e">정상</span>`}${dd.clockOut?` · 퇴근 ${dd.clockOut}`:''}`
-        : '<span style="color:#8b8fa8">미출근</span>';
-
-      const card = el('div','team-card');
-      card.innerHTML = `
-        <div class="team-card-header">
-          <div class="staff-avatar" style="background:${s.color||'#5b8af0'}">${(s.displayName||'?')[0]}</div>
-          <div>
-            <div style="font-weight:700;color:#fff">${s.displayName||s.email}</div>
-            <div style="font-size:11px;color:#6b7090">${att}</div>
-          </div>
-          <div style="margin-left:auto;font-size:20px;font-weight:800;color:${pc}">${pct}%</div>
-        </div>
+    const main=$('main-content'); const dateStr=today();
+    main.innerHTML=`<div class="page-header"><div class="page-title">팀 전체 현황 <span class="muted">· ${dateLabel(dateStr)}</span></div></div><div id="team-alerts"></div><div id="team-banner"></div><div class="team-grid" id="team-grid"></div>`;
+    const grid=$('team-grid'); const blockers=[],helps=[],alerts=[];
+    for(const s of staffList){
+      const sn=await getDocs(query(collection(db,"slots"),where("uid","==",s.uid),where("date","==",dateStr)));
+      let done=0,wip=0,undone=0; sn.forEach(d=>{const sd=d.data(); const st=sd.status; if(st==='done')done++; else if(st==='wip')wip++; else undone++; if(sd.needsHelp&&!sd.helpResolved) helps.push({name:s.displayName||s.email,title:sd.title||''});});
+      const total=done+wip+undone; const pct=total>0?Math.round(done/total*100):0; const pc=pct>=80?'var(--success)':pct>=50?'var(--warn)':'var(--danger)';
+      const dd=(await getDoc(doc(db,"daily",`${s.uid}_${dateStr}`))).data()||{};
+      const feedback=dd.selfFeedback||''; const li=lateInfo(dd.clockIn,s.workStart); const goals=dd.topGoals||[]; const goalsDone=goals.filter(g=>g.done).length; const blocker=(dd.blocker||'').trim();
+      if(blocker&&!dd.blockerResolved) blockers.push({name:s.displayName||s.email,text:blocker});
+      const anom=[]; if(dd.clockIn&&total===0) anom.push('출근했으나 업무 미기록');
+      const anyMemo=sn.docs.some(x=>(x.data().memo||'').trim());
+      if(total>0&&done===total&&!anyMemo&&!feedback.trim()) anom.push('전부 완료·근거 없음');
+      try{ const dAll=await getDocs(query(collection(db,"daily"),where("uid","==",s.uid))); const da=[]; dAll.forEach(x=>da.push(x.data())); da.sort((a,b)=>(b.date||'').localeCompare(a.date||'')); const r3=da.slice(0,3); if(r3.length>=3&&r3.every(day=>{const g=day.topGoals||[]; return g.length===0||g.filter(x=>x.done).length<g.length;})) anom.push('목표 3일 연속 미달'); }catch(e){}
+      anom.forEach(a=>alerts.push({name:s.displayName||s.email,text:a}));
+      const att=dd.clockIn?`출근 ${dd.clockIn} · ${li.late?`<span class="late">지각 ${li.mins}분</span>`:'<span class="ontime">정상</span>'}${dd.clockOut?` · 퇴근 ${dd.clockOut}`:''}`:'<span class="muted">미출근</span>';
+      const card=el('div','team-card');
+      card.innerHTML=`<div class="team-card-header"><div class="staff-avatar" style="background:${s.color||'#4f6bed'}">${(s.displayName||'?')[0]}</div><div><div class="team-name">${s.displayName||s.email}</div><div class="muted" style="font-size:11px">${att}</div></div><div class="team-pct" style="color:${pc}">${pct}%</div></div>
         <div class="progress-bar"><div style="width:${pct}%;background:${pc}"></div></div>
-        <div class="team-stats">
-          <span style="color:#22c55e">✅ ${done}</span>
-          <span style="color:#f59e0b">⏳ ${wip}</span>
-          <span style="color:#6b7090">📋 ${undone}</span>
-          <span style="color:#8fb0f0;margin-left:auto">🎯 ${goalsDone}/${goals.length}</span>
-        </div>
-        ${blocker?`<div style="font-size:11px;font-weight:700;color:#ef8f8f;background:#221012;border:1px solid #4a2020;border-radius:6px;padding:4px 8px;margin-top:8px">🚨 ${blocker}</div>`:''}
-        ${anom.length?`<div style="font-size:11px;font-weight:700;color:#f5c26b;background:#1a1408;border:1px solid #5a3a12;border-radius:6px;padding:4px 8px;margin-top:6px">⚠️ ${esc(anom.join(' · '))}</div>`:''}
-        ${feedback?`<div class="team-feedback">"${feedback.slice(0,80)}${feedback.length>80?'…':''}"</div>`:'<div class="team-feedback no-input">아직 피드백 없음</div>'}
-        <button class="btn btn-outline" style="width:100%;margin-top:10px;font-size:11px">상세 보기 →</button>
-      `;
-      card.querySelector('button').addEventListener('click',()=>selectStaff(s,staffList));
-      grid.appendChild(card);
+        <div class="team-stats"><span class="ontime">완료 ${done}</span><span style="color:var(--warn)">진행 ${wip}</span><span class="muted">미완 ${undone}</span><span style="margin-left:auto;color:var(--accent-text)">★ ${goalsDone}/${goals.length}</span></div>
+        ${blocker?`<div class="team-alert danger">🚨 ${esc(blocker)}</div>`:''}
+        ${anom.length?`<div class="team-alert warn">⚠️ ${esc(anom.join(' · '))}</div>`:''}
+        ${feedback?`<div class="team-feedback">"${esc(feedback.slice(0,80))}${feedback.length>80?'…':''}"</div>`:'<div class="team-feedback muted">아직 피드백 없음</div>'}
+        <button class="btn btn-ghost" style="width:100%;margin-top:10px" onclick="event.stopPropagation()">상세 보기 →</button>`;
+      card.querySelector('button').addEventListener('click',()=>selectStaff(s,staffList)); grid.appendChild(card);
     }
-    const awrap = $('team-alerts');
-    if(awrap && alerts.length){
-      awrap.innerHTML = `<div style="background:#1a1408;border:1px solid #5a3a12;border-radius:12px;padding:12px 16px;margin-bottom:16px;font-size:13px;color:#f0d0a0">`+
-        `<b style="color:#f59e0b">⚠️ 주목 ${alerts.length}건</b> · ${alerts.map(a=>esc(`${a.name}: ${a.text}`)).join(' · ')}</div>`;
-    }
-    const bwrap = $('team-banner');
-    const items = [];
-    blockers.forEach(b=>items.push(`${b.name} (${b.text})`));
-    helps.forEach(h=>items.push(`${h.name} — ${h.title}`));
-    if(bwrap && items.length){
-      bwrap.innerHTML = `<div style="background:#221012;border:1px solid #5a2626;border-radius:12px;padding:12px 16px;margin-bottom:16px;font-size:13px;color:#f0b8b8">`+
-        `<b style="color:#ef4444">🆘 도움요청 ${items.length}건</b> · ${items.map(esc).join(' · ')}</div>`;
-    }
+    const aw=$('team-alerts'); if(aw&&alerts.length) aw.innerHTML=`<div class="banner warn"><b>⚠️ 주목 ${alerts.length}건</b> · ${alerts.map(a=>esc(`${a.name}: ${a.text}`)).join(' · ')}</div>`;
+    const bw=$('team-banner'); const items=[]; blockers.forEach(b=>items.push(`${b.name} (${b.text})`)); helps.forEach(h=>items.push(`${h.name} — ${h.title}`));
+    if(bw&&items.length) bw.innerHTML=`<div class="banner danger"><b>🆘 도움요청 ${items.length}건</b> · ${items.map(esc).join(' · ')}</div>`;
   }
 
-  // ──────────────────────────────────────────
-  // 모달
-  // ──────────────────────────────────────────
-  window.showModal = (html) => {
-    $('modal-body').innerHTML = html;
-    $('modal-overlay').style.display = 'flex';
-  };
-  window.closeModal = () => { $('modal-overlay').style.display = 'none'; };
-  $('modal-overlay')?.addEventListener('click', e => { if(e.target===$('modal-overlay'))closeModal(); });
+  // ── 모달 ──
+  window.showModal = (html) => { $('modal-body').innerHTML=html; $('modal-overlay').style.display='flex'; };
+  window.closeModal = () => { $('modal-overlay').style.display='none'; };
+  $('modal-overlay')?.addEventListener('click',e=>{ if(e.target===$('modal-overlay')) closeModal(); });
 </script>
 
 <style>
-/* ── 리셋 & 기본 */
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: -apple-system, 'Malgun Gothic', '맑은 고딕', sans-serif; background: #0f1117; color: #e0e2ec; min-height: 100vh; font-size: 14px; }
+:root{
+  --bg:#f4f6fa; --surface:#ffffff; --surface-2:#f7f8fb; --soft:#fbfcfe;
+  --border:#e6e9f0; --border-strong:#d5dae4;
+  --text:#1f2430; --text-2:#5b6472; --text-3:#98a0ae;
+  --accent:#4f6bed; --accent-bg:#eef1fd; --accent-text:#3a4fc4;
+  --success:#16a34a; --success-bg:#e8f7ee;
+  --warn:#d97706; --warn-bg:#fdf3e3;
+  --danger:#dc2626; --danger-bg:#fdecec;
+  --important:#f59e0b;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:-apple-system,'Malgun Gothic','맑은 고딕',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;font-size:14px;}
+@keyframes pop{0%{transform:scale(.5);opacity:0}60%{transform:scale(1.15)}100%{transform:scale(1);opacity:1}}
+@keyframes starPulse{0%,100%{transform:scale(1)}50%{transform:scale(1.28)}}
+@keyframes slideIn{from{opacity:0;transform:translateX(-9px)}to{opacity:1;transform:translateX(0)}}
 
-/* ── 로그인 */
-#login-screen { display:flex; align-items:center; justify-content:center; min-height:100vh; background:#0f1117; }
-.login-box { background:#161922; border:1px solid #252836; border-radius:16px; padding:40px 36px; width:360px; }
-.login-logo { font-size:22px; font-weight:800; color:#fff; margin-bottom:4px; letter-spacing:-0.5px; }
-.login-logo span { color:#5b8af0; }
-.login-sub { font-size:13px; color:#6b6f85; margin-bottom:28px; }
-.login-label { font-size:12px; color:#8b8fa8; font-weight:600; margin-bottom:6px; display:block; }
-.login-input { width:100%; background:#0f1117; border:1px solid #252836; border-radius:8px; color:#e0e2ec; font-size:14px; padding:10px 12px; outline:none; margin-bottom:12px; }
-.login-input:focus { border-color:#5b8af0; }
-.login-btn { width:100%; padding:11px; background:#5b8af0; color:#fff; border:none; border-radius:8px; font-size:14px; font-weight:700; cursor:pointer; margin-top:4px; }
-.login-btn:hover { background:#4a79df; }
-.login-err { font-size:12px; color:#ef4444; margin-top:10px; min-height:18px; }
+/* 로그인 */
+#login-screen{display:flex;align-items:center;justify-content:center;min-height:100vh;background:var(--bg);}
+.login-box{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:40px 36px;width:360px;box-shadow:0 6px 24px rgba(30,40,80,.06);}
+.login-logo{font-size:22px;font-weight:800;color:var(--text);margin-bottom:4px;letter-spacing:-0.5px;}
+.login-logo span{color:var(--accent);}
+.login-sub{font-size:13px;color:var(--text-3);margin-bottom:28px;}
+.login-label{font-size:12px;color:var(--text-2);font-weight:600;margin-bottom:6px;display:block;}
+.login-input{width:100%;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:14px;padding:10px 12px;outline:none;margin-bottom:12px;}
+.login-input:focus{border-color:var(--accent);background:#fff;}
+.login-btn{width:100%;padding:11px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;margin-top:4px;}
+.login-btn:hover{background:#3f5bd8;}
+.login-err{font-size:12px;color:var(--danger);margin-top:10px;min-height:18px;}
 
-/* ── 앱 레이아웃 */
-#app-screen { display:none; flex-direction:column; height:100vh; }
-.top-nav { display:flex; align-items:center; background:#161922; border-bottom:1px solid #252836; padding:0 20px; height:52px; gap:0; flex-shrink:0; }
-.nav-logo { font-size:15px; font-weight:800; color:#fff; margin-right:24px; letter-spacing:-0.3px; }
-.nav-logo span { color:#5b8af0; }
-.nav-right { margin-left:auto; display:flex; align-items:center; gap:10px; }
-.role-badge { background:#1e2235; border:1px solid #252836; color:#8b8fa8; font-size:11px; padding:3px 10px; border-radius:20px; }
-.role-badge.boss { color:#f59e0b; border-color:#f59e0b; background:#1e1a0e; }
-.user-name { font-size:13px; color:#8b8fa8; }
-.logout-btn { font-size:12px; color:#4a4e63; cursor:pointer; padding:4px 8px; border-radius:6px; border:1px solid #252836; background:transparent; }
-.logout-btn:hover { color:#ef4444; border-color:#ef4444; }
+/* 앱 레이아웃 */
+#app-screen{display:none;flex-direction:column;height:100vh;}
+.top-nav{display:flex;align-items:center;background:var(--surface);border-bottom:1px solid var(--border);padding:0 20px;height:54px;flex-shrink:0;}
+.nav-logo{font-size:16px;font-weight:800;color:var(--text);margin-right:24px;letter-spacing:-0.3px;}
+.nav-logo span{color:var(--accent);}
+.nav-right{margin-left:auto;display:flex;align-items:center;gap:10px;}
+.role-badge{background:var(--surface-2);border:1px solid var(--border);color:var(--text-2);font-size:11px;padding:4px 11px;border-radius:20px;font-weight:600;}
+.role-badge.boss{color:var(--warn);border-color:#f0c98a;background:var(--warn-bg);}
+.user-name{font-size:13px;color:var(--text-2);}
+.logout-btn{font-size:12px;color:var(--text-3);cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--border);background:transparent;}
+.logout-btn:hover{color:var(--danger);border-color:var(--danger);}
+.app-body{display:flex;flex:1;overflow:hidden;}
 
-.app-body { display:flex; flex:1; overflow:hidden; }
+/* 사이드바 */
+#sidebar{width:196px;background:var(--surface);border-right:1px solid var(--border);overflow-y:auto;padding:14px 0;flex-shrink:0;}
+.sidebar-section{font-size:10px;font-weight:700;color:var(--text-3);padding:0 16px 8px;letter-spacing:1.2px;text-transform:uppercase;}
+.staff-item{display:flex;align-items:center;gap:9px;padding:9px 16px;cursor:pointer;transition:background .12s;}
+.staff-item:hover,.staff-item.active{background:var(--accent-bg);}
+.staff-item.active .staff-name{color:var(--accent-text);font-weight:600;}
+.staff-avatar{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#fff;flex-shrink:0;}
+.staff-name{font-size:13px;color:var(--text-2);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.staff-status{width:7px;height:7px;border-radius:50%;flex-shrink:0;}
+.status-ok{background:var(--success);}.status-none{background:var(--border-strong);}
+.view-all{display:flex;align-items:center;gap:8px;padding:11px 16px;cursor:pointer;font-size:13px;color:var(--accent);border-top:1px solid var(--border);margin-top:8px;font-weight:600;}
+.view-all:hover{background:var(--accent-bg);}
 
-/* ── 사이드바 */
-#sidebar { width:188px; background:#161922; border-right:1px solid #252836; overflow-y:auto; padding:14px 0; flex-shrink:0; }
-.sidebar-section { font-size:10px; font-weight:700; color:#4a4e63; padding:0 14px 8px; letter-spacing:1.2px; text-transform:uppercase; }
-.staff-item { display:flex; align-items:center; gap:9px; padding:8px 14px; cursor:pointer; transition:background .12s; }
-.staff-item:hover, .staff-item.active { background:#1e2235; }
-.staff-item.active .staff-name { color:#fff; }
-.staff-avatar { width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; color:#fff; flex-shrink:0; }
-.staff-name { font-size:13px; color:#8b8fa8; flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.staff-status { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
-.status-ok { background:#22c55e; }
-.status-warn { background:#f59e0b; }
-.status-none { background:#2a2d3a; }
-.view-all { display:flex; align-items:center; gap:8px; padding:10px 14px; cursor:pointer; font-size:13px; color:#5b8af0; border-top:1px solid #252836; margin-top:8px; }
-.view-all:hover { background:#1e2235; }
+/* 메인 */
+#main-content{flex:1;overflow-y:auto;padding:22px 26px;max-width:920px;margin:0 auto;width:100%;}
+.muted{color:var(--text-3);font-size:12px;}
+.empty{color:var(--text-3);padding:22px;text-align:center;background:var(--surface);border-radius:10px;border:1px dashed var(--border-strong);font-size:13px;}
+.page-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;}
+.page-title{font-size:19px;font-weight:800;color:var(--text);letter-spacing:-0.3px;}
+.page-sub{font-size:12px;color:var(--text-3);margin-top:3px;}
+.staff-header-avatar{width:42px;height:42px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:#fff;}
+.row{display:flex;align-items:center;}
+.row-between{display:flex;align-items:center;justify-content:space-between;gap:8px;}
+.sec-head{display:flex;align-items:center;justify-content:space-between;margin:4px 2px 10px;}
+.sec-title{font-size:14px;font-weight:700;color:var(--text);}
+.fld{font-size:12px;font-weight:600;color:var(--text-2);display:block;}
+.fld.danger{color:var(--danger);}
+.link-btn{font-size:12px;color:var(--accent);cursor:pointer;white-space:nowrap;}
+.link-btn:hover{text-decoration:underline;}
 
-/* ── 메인 */
-#main-content { flex:1; overflow-y:auto; padding:22px 24px; }
-.loading { color:#4a4e63; padding:40px; text-align:center; }
-.empty-state { color:#4a4e63; padding:24px; text-align:center; background:#161922; border-radius:8px; border:1px dashed #252836; font-size:13px; }
+/* 탭 */
+.tabbar{display:inline-flex;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:3px;gap:2px;}
+.tabbtn{border:none;background:transparent;color:var(--text-2);font-size:13px;font-weight:600;padding:7px 14px;border-radius:8px;cursor:pointer;}
+.tabbtn.active{background:var(--accent);color:#fff;}
 
-/* ── 페이지 헤더 */
-.page-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:20px; }
-.page-title { font-size:18px; font-weight:800; color:#fff; letter-spacing:-0.3px; }
-.page-sub { font-size:12px; color:#6b6f85; margin-top:3px; }
-.staff-header-avatar { width:40px; height:40px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:17px; font-weight:700; color:#fff; }
+/* 카드 */
+.soft-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;box-shadow:0 1px 2px rgba(30,40,80,.03);}
+.clock-line{font-size:13px;color:var(--text);}
+.late{color:var(--warn);font-weight:700;}
+.ontime{color:var(--success);font-weight:600;}
+.mini-input{background:var(--surface-2);border:1px solid var(--border);border-radius:7px;color:var(--text);font-size:13px;padding:8px 10px;outline:none;}
+.mini-input:focus{border-color:var(--accent);background:#fff;}
+.ta{width:100%;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:10px 12px;outline:none;resize:vertical;height:64px;font-family:inherit;line-height:1.6;}
+.ta:focus{border-color:var(--accent);background:#fff;}
 
-/* ── 주간 그리드 */
-.section-title { font-size:11px; font-weight:700; color:#4a4e63; text-transform:uppercase; letter-spacing:1px; margin-bottom:10px; }
-.week-grid { background:#161922; border:1px solid #252836; border-radius:12px; overflow:hidden; margin-bottom:20px; }
-.week-header-row { display:grid; grid-template-columns:60px repeat(5,1fr); border-bottom:1px solid #252836; }
-.time-col-hdr { padding:8px; }
-.day-hdr { padding:8px 6px; text-align:center; font-size:12px; font-weight:700; color:#6b7090; border-left:1px solid #252836; line-height:1.4; }
-.day-hdr.today { color:#5b8af0; background:#141828; }
-.day-date { font-size:10px; font-weight:400; color:#4a4e63; }
-.week-row { display:grid; grid-template-columns:60px repeat(5,1fr); border-bottom:1px solid #1a1d28; }
-.week-row:last-child { border-bottom:none; }
-.time-col { padding:8px 8px; font-size:11px; color:#4a4e63; display:flex; align-items:center; }
-.week-cell { border-left:1px solid #1a1d28; min-height:52px; padding:4px; cursor:pointer; transition:background .1s; position:relative; }
-.week-cell:hover { background:#1a1d28; }
-.week-cell.today-col { background:#0f1421; }
-.week-cell.has-data { cursor:pointer; }
-.slot-chip { padding:4px 6px; border-radius:5px; background:#1e2235; border-left:3px solid #5b8af0; height:100%; min-height:44px; }
-.slot-title { font-size:11px; color:#c8cad8; line-height:1.3; margin-bottom:2px; }
-.slot-status { font-size:10px; font-weight:600; }
+/* 모드 배너 */
+.mode{display:flex;align-items:center;gap:12px;border-radius:12px;padding:12px 15px;margin-bottom:14px;animation:slideIn .4s ease both;}
+.mode-am{background:var(--accent-bg);}
+.mode-pm{background:var(--success-bg);}
+.mode .mi{font-size:20px;font-style:normal;}
+.mode-am .mt{color:var(--accent-text);font-weight:700;font-size:14px;}
+.mode-am .ms{color:#5566cc;font-size:12px;margin-top:2px;}
+.mode-pm .mt{color:#15803d;font-weight:700;font-size:14px;}
+.mode-pm .ms{color:#3f9d63;font-size:12px;margin-top:2px;}
 
-/* ── 오늘 상세 */
-.two-col { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
-.card { background:#161922; border:1px solid #252836; border-radius:12px; padding:16px; }
-.card-title { font-size:12px; font-weight:700; color:#c0c2d0; margin-bottom:12px; display:flex; align-items:center; gap:7px; }
-.dot { width:8px; height:8px; border-radius:50%; display:inline-block; flex-shrink:0; }
-.today-slot-row { display:flex; align-items:flex-start; gap:10px; padding:9px 0; border-bottom:1px solid #1a1d28; }
-.today-slot-row:last-child { border-bottom:none; }
-.slot-time { font-size:11px; color:#4a4e63; font-weight:600; width:40px; flex-shrink:0; padding-top:2px; }
-.slot-body { flex:1; }
-.slot-name { font-size:13px; color:#c8cad8; }
-.slot-memo { font-size:11px; color:#6b7090; margin-top:2px; }
-.slot-st { font-size:11px; font-weight:600; flex-shrink:0; padding-top:2px; }
-.boss-comment-inline { font-size:11px; color:#7ab040; margin-top:4px; background:#14180e; border-radius:4px; padding:3px 7px; }
+/* 오늘 할 일 리스트 */
+#task-list{display:flex;flex-direction:column;gap:0;}
+.task-row{display:flex;align-items:flex-start;gap:10px;padding:11px 12px;background:var(--surface);border:1px solid var(--border);border-radius:10px;margin-bottom:8px;transition:box-shadow .12s;}
+.task-row:hover{box-shadow:0 2px 8px rgba(30,40,80,.06);}
+.task-row.static{cursor:default;}
+.task-row.carry-item{background:var(--warn-bg);border-color:#f0d9a8;animation:slideIn .45s ease both;}
+.task-row.task-done{opacity:.72;}
+.task-row.task-done .task-title{text-decoration:line-through;color:var(--text-3);}
+.star{font-size:17px;color:var(--text-3);cursor:pointer;flex-shrink:0;line-height:1.4;user-select:none;}
+.task-important .star{color:var(--important);animation:starPulse 1.9s ease-in-out infinite;}
+.task-main{flex:1;min-width:0;}
+.task-title{font-size:14px;color:var(--text);line-height:1.45;}
+.task-meta{font-size:11.5px;color:var(--text-3);margin-top:2px;display:inline-block;}
+.task-links{margin-top:5px;}
+.help-note{font-size:11.5px;color:var(--warn);margin-top:3px;}
+.boss-inline{font-size:12px;color:var(--accent-text);background:var(--accent-bg);border-radius:6px;padding:4px 8px;margin-top:5px;}
+.pill{font-size:10px;font-weight:600;padding:2px 7px;border-radius:20px;vertical-align:1px;}
+.pill-carry{background:#f6e3c0;color:#92600d;}
+.pill-help{background:var(--danger-bg);color:var(--danger);}
+.seg-group{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;flex-shrink:0;}
+.seg{border:none;background:var(--surface);color:var(--text-3);font-size:11.5px;font-weight:600;padding:5px 9px;cursor:pointer;border-left:1px solid var(--border);}
+.seg:first-child{border-left:none;}
+.seg.on.seg-done{background:var(--success);color:#fff;}
+.seg.on.seg-wip{background:var(--warn);color:#fff;}
+.seg.on.seg-todo{background:#64748b;color:#fff;}
+.more{font-size:18px;color:var(--text-3);cursor:pointer;flex-shrink:0;padding:0 2px;line-height:1;}
+.more:hover{color:var(--text);}
+.badge{font-size:12px;font-weight:600;flex-shrink:0;}
 
-/* ── 팀 전체 */
-.team-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:14px; }
-.team-card { background:#161922; border:1px solid #252836; border-radius:12px; padding:16px; }
-.team-card-header { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
-.progress-bar { background:#1e2235; border-radius:4px; height:5px; overflow:hidden; margin-bottom:10px; }
-.progress-bar > div { height:100%; border-radius:4px; transition:width .3s; }
-.team-stats { display:flex; gap:14px; font-size:12px; font-weight:600; margin-bottom:10px; }
-.team-feedback { font-size:12px; color:#6b7090; font-style:italic; line-height:1.5; }
-.team-feedback.no-input { color:#3a3d4e; }
+.add-row{display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:6px 10px;margin-top:2px;}
+.add-plus{color:var(--text-3);font-style:normal;font-size:16px;}
+.add-input{flex:1;border:none;background:transparent;outline:none;font-size:14px;color:var(--text);padding:6px 0;}
 
-/* ── 폼 공통 */
-.form-group { margin-bottom:14px; }
-.form-group label { font-size:12px; color:#8b8fa8; font-weight:600; display:block; margin-bottom:5px; }
-.form-input { width:100%; background:#0f1117; border:1px solid #252836; border-radius:7px; color:#e0e2ec; font-size:13px; padding:9px 11px; outline:none; }
-.form-input:focus { border-color:#5b8af0; }
-.form-textarea { width:100%; background:#0f1117; border:1px solid #252836; border-radius:7px; color:#e0e2ec; font-size:13px; padding:9px 11px; outline:none; resize:vertical; height:80px; font-family:inherit; }
-.form-textarea:focus { border-color:#5b8af0; }
+/* 마무리 */
+.wrap-toggle{display:flex;align-items:center;justify-content:space-between;cursor:pointer;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-top:16px;font-size:14px;font-weight:600;color:var(--text);}
+.wrap-toggle i{font-style:normal;color:var(--text-3);margin-right:4px;}
+.tmr-row{display:flex;gap:6px;margin-bottom:6px;align-items:center;}
+.xbtn{background:transparent;border:none;color:var(--text-3);cursor:pointer;font-size:14px;}
+.xbtn:hover{color:var(--danger);}
+.miss{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.miss-t{font-size:12px;font-weight:700;color:var(--text-2);}
+.chip{display:inline-block;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:20px;background:var(--surface-2);color:var(--text-2);margin:2px 0;}
+.chip-ok{background:var(--success-bg);color:#15803d;}
+.chip-bad{background:var(--danger-bg);color:var(--danger);}
 
-/* ── 상태 버튼 */
-.status-btns { display:flex; gap:6px; flex-wrap:wrap; }
-.status-btn { padding:6px 12px; border-radius:6px; background:#1e2235; border:1px solid #252836; color:#6b7090; font-size:12px; cursor:pointer; transition:all .12s; }
-.status-btn.active { background:color-mix(in srgb,var(--sc) 15%,#0f1117); border-color:var(--sc); color:var(--sc); font-weight:700; }
+/* 필수업무 */
+.rt-row{display:flex;align-items:flex-start;gap:10px;padding:9px 0;border-bottom:1px solid var(--border);}
+.rt-row:last-child{border-bottom:none;}
+.rt-check{width:20px;height:20px;border-radius:6px;border:1.6px solid var(--border-strong);display:inline-flex;align-items:center;justify-content:center;font-size:13px;color:var(--success);cursor:pointer;flex-shrink:0;background:#fff;}
+.rt-check.on{background:var(--success-bg);border-color:var(--success);}
+.rt-title{font-size:13.5px;font-weight:600;color:var(--text);}
+.rt-title.done{color:var(--text-3);text-decoration:line-through;}
+.rt-guide{margin-top:6px;background:var(--accent-bg);border:1px solid #cdd7f7;border-radius:8px;padding:8px 10px;font-size:12px;color:var(--accent-text);line-height:1.7;white-space:pre-wrap;}
+.linkpill{display:inline-flex;align-items:center;gap:4px;background:var(--accent-bg);border:1px solid #d3ddf8;color:var(--accent-text);border-radius:20px;padding:2px 9px;font-size:11px;text-decoration:none;margin:3px 4px 0 0;}
+.link-edit{display:flex;gap:6px;margin-bottom:6px;align-items:center;}
+.help-box{border:1px solid #f0d9a8;border-radius:8px;padding:10px;background:var(--warn-bg);color:var(--warn);}
 
-/* ── 버튼 */
-.btn { padding:7px 14px; border-radius:7px; font-size:12px; font-weight:600; cursor:pointer; border:none; display:inline-flex; align-items:center; gap:5px; transition:all .12s; }
-.btn-primary { background:#5b8af0; color:#fff; }
-.btn-primary:hover { background:#4a79df; }
-.btn-outline { background:transparent; color:#8b8fa8; border:1px solid #252836; }
-.btn-outline:hover { color:#fff; border-color:#5b8af0; }
-.btn-danger { background:#2e1a1a; color:#ef4444; border:1px solid #4a2020; }
-.btn-sm { padding:3px 8px; border-radius:5px; font-size:11px; font-weight:600; cursor:pointer; border:none; }
-.btn-approve { background:#1a2e1f; color:#22c55e; border:1px solid #2a4432; }
-.btn-return  { background:#2e1a1a; color:#ef4444;  border:1px solid #4a2020; }
+/* 주간 그리드 */
+.week-grid{background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:20px;}
+.week-header-row{display:grid;grid-template-columns:56px repeat(5,1fr);border-bottom:1px solid var(--border);}
+.time-col-hdr{padding:8px;}
+.day-hdr{padding:8px 6px;text-align:center;font-size:12px;font-weight:700;color:var(--text-2);border-left:1px solid var(--border);line-height:1.4;}
+.day-hdr.today{color:var(--accent);background:var(--accent-bg);}
+.day-date{font-size:10px;font-weight:400;color:var(--text-3);}
+.week-row{display:grid;grid-template-columns:56px repeat(5,1fr);border-bottom:1px solid var(--border);}
+.week-row:last-child{border-bottom:none;}
+.time-col{padding:8px;font-size:11px;color:var(--text-3);display:flex;align-items:center;}
+.week-cell{border-left:1px solid var(--border);min-height:50px;padding:4px;cursor:pointer;transition:background .1s;}
+.week-cell:hover{background:var(--surface-2);}
+.week-cell.today-col{background:#f0f4ff;}
+.slot-chip{padding:4px 6px;border-radius:6px;background:var(--surface-2);border-left:3px solid var(--accent);min-height:42px;}
+.slot-title{font-size:11px;color:var(--text);line-height:1.3;margin-bottom:2px;}
+.slot-status{font-size:10px;font-weight:600;}
 
-/* ── 내일 업무 */
-.tomorrow-row { display:flex; gap:6px; margin-bottom:6px; align-items:center; }
-.tomorrow-row button { background:transparent; border:none; color:#4a4e63; cursor:pointer; font-size:14px; flex-shrink:0; }
-.tomorrow-row button:hover { color:#ef4444; }
+/* 지난 기록 */
+.hist-row{display:flex;align-items:center;justify-content:space-between;padding:9px 4px;border-bottom:1px solid var(--border);cursor:pointer;font-size:13px;}
+.hist-row:last-child{border-bottom:none;}
+.hist-row:hover{background:var(--surface-2);}
+.fbox{background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-size:13px;color:var(--text-2);line-height:1.7;margin-top:5px;}
+.fbox.danger{border-color:#f3c0c0;color:var(--danger);background:var(--danger-bg);}
 
-/* ── 피드백 박스 */
-.feedback-box { background:#1a1d2a; border:1px solid #252836; border-radius:7px; padding:11px; font-size:13px; color:#8b8fa8; line-height:1.7; }
+/* 오늘 상세(관리자) 2열 */
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+.help-note{font-size:11.5px;color:var(--warn);margin-top:3px;}
 
-/* ── 모달 */
-#modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:100; align-items:center; justify-content:center; backdrop-filter:blur(2px); }
-.modal-box { background:#161922; border:1px solid #252836; border-radius:14px; width:460px; max-width:95vw; max-height:90vh; overflow-y:auto; padding:24px; }
-.modal-title { font-size:15px; font-weight:800; color:#fff; margin-bottom:20px; }
-.modal-footer { display:flex; gap:8px; justify-content:flex-end; margin-top:20px; padding-top:16px; border-top:1px solid #252836; }
+/* 폼 */
+.form-group{margin-bottom:14px;}
+.form-group label{font-size:12px;color:var(--text-2);font-weight:600;display:block;margin-bottom:5px;}
 
-/* ── 스크롤바 */
-::-webkit-scrollbar { width:4px; height:4px; }
-::-webkit-scrollbar-track { background:transparent; }
-::-webkit-scrollbar-thumb { background:#252836; border-radius:2px; }
+/* 버튼 */
+.btn{padding:8px 14px;border-radius:8px;font-size:12.5px;font-weight:600;cursor:pointer;border:none;display:inline-flex;align-items:center;gap:5px;transition:all .12s;}
+.btn-primary{background:var(--accent);color:#fff;}
+.btn-primary:hover{background:#3f5bd8;}
+.btn-ghost{background:var(--surface);color:var(--text-2);border:1px solid var(--border);}
+.btn-ghost:hover{border-color:var(--accent);color:var(--accent);}
+.btn-danger{background:var(--danger-bg);color:var(--danger);border:1px solid #f3c0c0;}
+.btn-sm{padding:4px 9px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;border:none;}
+.btn-approve{background:var(--success-bg);color:var(--success);border:1px solid #b6e6c8;}
+.btn-return{background:var(--danger-bg);color:var(--danger);border:1px solid #f3c0c0;}
+
+/* 팀 */
+.team-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;}
+.team-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;box-shadow:0 1px 2px rgba(30,40,80,.03);}
+.team-card-header{display:flex;align-items:center;gap:10px;margin-bottom:10px;}
+.team-name{font-weight:700;color:var(--text);}
+.team-pct{margin-left:auto;font-size:20px;font-weight:800;}
+.progress-bar{background:var(--surface-2);border-radius:4px;height:6px;overflow:hidden;margin-bottom:10px;}
+.progress-bar>div{height:100%;border-radius:4px;transition:width .3s;}
+.team-stats{display:flex;gap:12px;font-size:12px;font-weight:600;margin-bottom:8px;}
+.team-feedback{font-size:12px;color:var(--text-2);font-style:italic;line-height:1.5;}
+.team-alert{font-size:11.5px;font-weight:600;border-radius:6px;padding:5px 8px;margin-top:6px;}
+.team-alert.danger{color:var(--danger);background:var(--danger-bg);border:1px solid #f3c0c0;}
+.team-alert.warn{color:#92600d;background:var(--warn-bg);border:1px solid #f0d9a8;}
+.banner{border-radius:12px;padding:12px 16px;margin-bottom:16px;font-size:13px;}
+.banner.warn{background:var(--warn-bg);border:1px solid #f0d9a8;color:#92600d;}
+.banner.danger{background:var(--danger-bg);border:1px solid #f3c0c0;color:var(--danger);}
+
+/* 모달 */
+#modal-overlay{display:none;position:fixed;inset:0;background:rgba(30,40,70,.35);z-index:100;align-items:center;justify-content:center;}
+.modal-box{background:var(--surface);border:1px solid var(--border);border-radius:14px;width:460px;max-width:95vw;max-height:90vh;overflow-y:auto;padding:24px;box-shadow:0 12px 40px rgba(30,40,80,.18);}
+.modal-title{font-size:16px;font-weight:800;color:var(--text);margin-bottom:18px;}
+.modal-footer{display:flex;gap:8px;justify-content:flex-end;margin-top:18px;padding-top:16px;border-top:1px solid var(--border);}
+.modal-seg{display:inline-flex;}
+::-webkit-scrollbar{width:8px;height:8px;}
+::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:4px;}
 </style>
 </head>
 <body>
 
-<!-- ── 로그인 화면 -->
 <div id="login-screen">
   <div class="login-box">
     <div class="login-logo">Work<span>Board</span></div>
@@ -1403,9 +967,7 @@ body { font-family: -apple-system, 'Malgun Gothic', '맑은 고딕', sans-serif;
   </div>
 </div>
 
-<!-- ── 앱 화면 -->
 <div id="app-screen">
-  <!-- 상단 네비 -->
   <div class="top-nav">
     <div class="nav-logo">Work<span>Board</span></div>
     <div class="nav-right">
@@ -1414,18 +976,13 @@ body { font-family: -apple-system, 'Malgun Gothic', '맑은 고딕', sans-serif;
       <button class="logout-btn" onclick="doLogout()">로그아웃</button>
     </div>
   </div>
-
-  <!-- 앱 바디 -->
   <div class="app-body">
     <div id="sidebar"></div>
     <div id="main-content"></div>
   </div>
 </div>
 
-<!-- 모달 -->
-<div id="modal-overlay">
-  <div class="modal-box" id="modal-body"></div>
-</div>
+<div id="modal-overlay"><div class="modal-box" id="modal-body"></div></div>
 
 </body>
 </html>
