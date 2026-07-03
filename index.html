@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- WorkBoard build 2026-07-03b (topics + subtasks) -->
+<!-- WorkBoard build 2026-07-03c (topics + subtasks + boss category mgr) -->
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
@@ -719,6 +719,7 @@
         <div class="row" style="gap:12px"><div class="staff-header-avatar" style="background:${s.color||'#4f6bed'}">${(s.displayName||'?')[0]}</div><div><div class="page-title">${s.displayName||s.email}</div><div class="page-sub" id="staff-meta">로딩 중...</div></div></div>
         <div class="row" style="gap:8px">
           <button class="btn btn-ghost" onclick="openAddTaskModal('${s.uid}','${esc(s.displayName||s.email)}')">＋ 업무 배정</button>
+          <button class="btn btn-ghost" onclick="openCategoryManager('${s.uid}')">주제 관리</button>
           <button class="btn btn-ghost" onclick="openRoutineManager('${s.uid}')">필수 업무</button>
           <button class="btn btn-primary" onclick="openBossCommentModal('${s.uid}','${esc(s.displayName||s.email)}')">지시 보내기</button>
           <button class="btn btn-ghost" onclick="bossShowHistory('${s.uid}')">지난 기록</button>
@@ -778,20 +779,22 @@
     await setDoc(doc(db,"slots",slotId),payload,{merge:true}); alert(approved?'승인했습니다.':'반려했습니다.');
   };
   window.saveBossComment = async (uid, dateStr) => { const c=$('boss-comment-input')?.value.trim()||''; await setDoc(doc(db,"daily",`${uid}_${dateStr}`),{bossComment:c,bossCommentAt:Timestamp.now()},{merge:true}); alert('코멘트가 저장되었습니다.'); };
-  window.openAddTaskModal = (uid,name) => {
+  window.openAddTaskModal = async (uid,name) => {
+    await loadCategories();
     const t=new Date(); t.setDate(t.getDate()+1); const tStr=t.toISOString().slice(0,10);
     showModal(`<div class="modal-title">업무 배정 — ${name}</div>
       <div class="form-group"><label>날짜</label><input id="at-date" type="date" class="mini-input" style="width:100%" value="${tStr}"></div>
+      <div class="form-group"><label>주제 (선택)</label><div class="row" style="gap:6px"><select id="at-cat" class="mini-input" style="flex:1">${catOptions('')}</select><button type="button" class="btn btn-ghost" onclick="newCatInline('at-cat')">＋ 새 주제</button></div></div>
       <div class="form-group"><label>예정 시간 (선택)</label><input id="at-time" type="time" class="mini-input" style="width:100%"></div>
       <div class="form-group"><label>업무 내용</label><input id="at-title" class="mini-input" style="width:100%" placeholder="업무 내용"></div>
       <div class="form-group"><label>메모 (선택)</label><textarea id="at-memo" class="ta" placeholder="상세 지시사항"></textarea></div>
       <div class="modal-footer"><button class="btn btn-ghost" onclick="closeModal()">취소</button><button class="btn btn-primary" onclick="saveAddedTask('${uid}')">배정</button></div>`);
   };
   window.saveAddedTask = async (uid) => {
-    const date=$('at-date').value, time=$('at-time').value, title=$('at-title').value.trim(), memo=$('at-memo').value.trim();
+    const date=$('at-date').value, time=$('at-time').value, title=$('at-title').value.trim(), memo=$('at-memo').value.trim(), category=$('at-cat')?.value||'';
     if(!title){ alert('업무 내용을 입력하세요'); return; }
     const id=`${uid}_${date}_${newKey()}`;
-    await setDoc(doc(db,"slots",id),{uid,date,plannedTime:time||'',title,memo,status:'todo',important:false,weekStart:weekStart(new Date(date)),assignedBy:currentUser.uid,updatedAt:Timestamp.now()},{merge:true});
+    await setDoc(doc(db,"slots",id),{uid,date,plannedTime:time||'',title,memo,category,status:'todo',important:false,weekStart:weekStart(new Date(date)),assignedBy:currentUser.uid,updatedAt:Timestamp.now()},{merge:true});
     closeModal(); alert('업무가 배정되었습니다.'); if(_curStaff && _curStaff.uid===uid) renderBossStaffDetail(_curStaff);
   };
   window.openBossCommentModal = (uid,name) => {
