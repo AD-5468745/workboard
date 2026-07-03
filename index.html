@@ -244,6 +244,7 @@
     const snap=await getDocs(query(collection(db,"slots"),where("uid","==",uid),where("date","==",dateStr)));
     todayTasks=[]; snap.forEach(d=>todayTasks.push({id:d.id, ...d.data()}));
     renderTaskList(uid);
+    syncGoals(uid);
   }
   function sortTasks(a,b){
     if(!!b.important - !!a.important) return (!!b.important)-(!!a.important);
@@ -422,7 +423,7 @@
   function updateMissCheck(){
     const box=$('miss-check'); if(!box) return;
     const unchecked=todayTasks.filter(t=>t.title && (t.status==='todo'||t.status==='skip')).length;
-    const fb=($('self-feedback')?.value||'').trim(), bl=($('blocker-input')?.value||'').trim(), tmr=($('tomorrow-detail')?.value||'').trim();
+    const fb=(($('self-feedback')?.value||'')+($('improve-input')?.value||'')).trim(), bl=($('blocker-input')?.value||'').trim(), tmr=($('tomorrow-detail')?.value||'').trim();
     const chips=[];
     chips.push(unchecked>0?`<span class="chip chip-bad">미체크 ${unchecked}개</span>`:`<span class="chip chip-ok">할 일 체크 완료</span>`);
     chips.push(fb?`<span class="chip chip-ok">회고 작성</span>`:`<span class="chip chip-bad">회고 비었음</span>`);
