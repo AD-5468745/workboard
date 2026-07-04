@@ -9,7 +9,8 @@
 <!-- Firebase -->
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-  import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged }
+  import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged,
+    updatePassword, reauthenticateWithCredential, EmailAuthProvider }
     from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
   import { getFirestore, doc, setDoc, getDoc, collection, query, where,
     getDocs, onSnapshot, orderBy, Timestamp, deleteDoc, addDoc }
@@ -100,7 +101,9 @@
 
   // ── AUTH ──
   onAuthStateChanged(auth, async user => {
-    if(user){ currentUser=user; const snap=await getDoc(doc(db,"users",user.uid)); userProfile=snap.data()||{}; userRole=userProfile.role||'staff'; showApp(); }
+    if(user){ currentUser=user; const snap=await getDoc(doc(db,"users",user.uid)); userProfile=snap.data()||{};
+      if(userProfile.active===false){ alert('접근이 차단된 계정입니다. 관리자에게 문의하세요.'); currentUser=null; await signOut(auth); return; }
+      userRole=userProfile.role||'staff'; showApp(); }
     else { currentUser=null; showLogin(); }
   });
   window.doLogin = async () => {
@@ -115,16 +118,125 @@
   };
   window.doLogout = async () => { await signOut(auth); };
 
+  // ── 내 계정(본인 이름·비밀번호 변경) ──
+  window.openMyAccount = () => {
+    showModal(`<div class="modal-title">내 계정</div>
+      <div class="form-group"><label>이름</label><input id="my-name" class="mini-input" style="width:100%" value="${esc((userProfile&&userProfile.displayName)||'')}">
+        <div style="text-align:right;margin-top:6px"><button class="btn btn-primary" onclick="saveMyName()">이름 저장</button></div></div>
+      <div style="border-top:1px solid var(--border);margin-top:8px;padding-top:12px">
+        <div class="fld" style="margin-bottom:8px">비밀번호 변경</div>
+        <div class="form-group"><label>현재 비밀번호</label><input id="my-pw0" type="password" class="mini-input" style="width:100%"></div>
+        <div class="form-group"><label>새 비밀번호 (6자 이상)</label><input id="my-pw1" type="password" class="mini-input" style="width:100%"></div>
+        <div style="text-align:right"><button class="btn btn-primary" onclick="saveMyPw()">비밀번호 변경</button></div>
+      </div>
+      <div class="modal-footer"><button class="btn btn-ghost" onclick="closeModal()">닫기</button></div>`);
+  };
+  window.saveMyName = async () => {
+    const n=$('my-name').value.trim(); if(!n){ alert('이름을 입력하세요'); return; }
+    await setDoc(doc(db,"users",currentUser.uid),{displayName:n},{merge:true});
+    if(userProfile) userProfile.displayName=n; const b=$('user-name-badge'); if(b) b.textContent=n;
+    alert('이름이 변경되었습니다.');
+  };
+  window.saveMyPw = async () => {
+    const p0=$('my-pw0').value, p1=$('my-pw1').value;
+    if(!p0||!p1){ alert('현재/새 비밀번호를 모두 입력하세요'); return; }
+    if(p1.length<6){ alert('새 비밀번호는 6자 이상이어야 합니다'); return; }
+    try{
+      const cred=EmailAuthProvider.credential(currentUser.email, p0);
+      await reauthenticateWithCredential(currentUser, cred);
+      await updatePassword(currentUser, p1);
+      alert('비밀번호가 변경되었습니다.'); closeModal();
+    }catch(e){ const c=(e&&e.code)||''; if(c.includes('wrong-password')||c.includes('invalid-credential')) alert('현재 비밀번호가 올바르지 않습니다.'); else alert('변경 실패: '+(e.message||c)); }
+  };
+
+  // ── 관리자: 직원 계정 관리(이름 변경 · 접속 차단) ──
+  window.openStaffAccount = (uid, name, active) => {
+    window.__saActive = active!==false;
+    showModal(`<div class="modal-title">계정 관리 — ${esc(name)}</div>
+      <div class="form-group"><label>이름</label><input id="sa-name" class="mini-input" style="width:100%" value="${esc(name)}"></div>
+      <div class="form-group"><label>접속 상태</label>
+        <div class="seg-group modal-seg" id="sa-seg"><button class="seg ${active!==false?'on seg-done':''}" onclick="setSaActive(true,this)">활성(접속 허용)</button><button class="seg ${active===false?'on seg-todo':''}" onclick="setSaActive(false,this)">차단(접속 불가)</button></div></div>
+      <div class="muted" style="line-height:1.7">· 차단하면 그 직원은 로그인해도 바로 로그아웃됩니다.<br>· 비밀번호 재설정은 보안상 앱에서 불가 — Firebase 콘솔에서 하세요.</div>
+      <div class="modal-footer"><button class="btn btn-ghost" onclick="closeModal()">취소</button><button class="btn btn-primary" onclick="saveStaffAccount('${uid}')">저장</button></div>`);
+  };
+  window.setSaActive = (v,btn)=>{ window.__saActive=v; [...btn.parentElement.children].forEach(b=>b.className='seg'); btn.classList.add('on', v?'seg-done':'seg-todo'); };
+  window.saveStaffAccount = async (uid)=>{
+    const n=$('sa-name').value.trim(); if(!n){ alert('이름을 입력하세요'); return; }
+    await setDoc(doc(db,"users",uid),{displayName:n, active:window.__saActive},{merge:true});
+    closeModal(); alert('저장되었습니다.'); if(userRole==='boss') renderBossView();
+  };
+
+  // ══════════════════════════════════════
+  //  오른쪽 메모장 (개인 + 지정 공유)
+  // ══════════════════════════════════════
+  let memos=[]; let memoCat='';
+  async function loadMemos(){
+    const uid=currentUser.uid; const map=new Map();
+    try{
+      const mine=await getDocs(query(collection(db,"memos"),where("owner","==",uid)));
+      mine.forEach(d=>map.set(d.id,{id:d.id,...d.data()}));
+      const shared=await getDocs(query(collection(db,"memos"),where("sharedWith","array-contains",uid)));
+      shared.forEach(d=>{ if(!map.has(d.id)) map.set(d.id,{id:d.id,...d.data()}); });
+    }catch(e){ console.error('[WB] memos',e); }
+    memos=[...map.values()].sort((a,b)=>((b.updatedAt&&b.updatedAt.seconds)||0)-((a.updatedAt&&a.updatedAt.seconds)||0));
+  }
+  async function renderMemoPanel(){
+    const p=$('memo-panel'); if(!p) return; p.classList.remove('hidden');
+    await loadMemos();
+    const cats=[...new Set(memos.map(m=>(m.category||'').trim()).filter(Boolean))];
+    if(memoCat && !cats.includes(memoCat)) memoCat='';
+    const list=memos.filter(m=>!memoCat || (m.category||'')===memoCat);
+    const catChips=`<span class="memo-cat${memoCat===''?' active':''}" onclick="memoSetCat('')">전체</span>`+cats.map(c=>`<span class="memo-cat${memoCat===c?' active':''}" onclick="memoSetCat('${encodeURIComponent(c)}')">${esc(c)}</span>`).join('');
+    const card=(m)=>{ const shared=(m.sharedWith||[]).length; const mine=m.owner===currentUser.uid;
+      return `<div class="memo-card"><div class="mc-top"><div style="flex:1"><div class="mc-title">${esc(m.title||'(제목 없음)')}</div>${m.category?`<span class="mc-cat">${esc(m.category)}</span>`:''}</div></div>
+        <div class="mc-body">${esc(m.body||'')}</div>
+        ${shared?`<div class="mc-share">🔗 ${mine?'공유 중':('공유받음 · '+esc(m.ownerName||''))} · ${shared}명</div>`:''}
+        <div class="mc-actions"><button class="mc-btn copy" onclick="copyMemo('${m.id}')">📋 복사</button>${mine?`<button class="mc-btn" onclick="openMemoEdit('${m.id}')">수정</button><button class="mc-btn" onclick="deleteMemo('${m.id}')">삭제</button>`:''}</div></div>`;
+    };
+    p.innerHTML=`<div class="memo-head"><span class="memo-title">📝 메모장</span><button class="btn btn-primary" style="padding:5px 11px" onclick="openMemoEdit('')">＋ 새 메모</button></div>
+      <div class="muted" style="margin-bottom:8px">복붙할 글귀·업무 메모를 정리하세요.</div>
+      <div class="memo-cats">${catChips}</div>
+      ${list.length?list.map(card).join(''):'<div class="memo-empty">아직 메모가 없어요.<br>＋ 새 메모로 추가하세요.</div>'}`;
+  }
+  window.memoSetCat=(c)=>{ memoCat=decodeURIComponent(c); renderMemoPanel(); };
+  window.copyMemo=async(id)=>{ const m=memos.find(x=>x.id===id); if(!m) return; const txt=m.body||'';
+    try{ await navigator.clipboard.writeText(txt); }catch(e){ const ta=document.createElement('textarea'); ta.value=txt; document.body.appendChild(ta); ta.select(); try{document.execCommand('copy');}catch(_){} ta.remove(); }
+    alert('복사됐어요.'); };
+  window.openMemoEdit=async(id)=>{
+    const m = id?memos.find(x=>x.id===id):null;
+    let users=[]; try{ const us=await getDocs(collection(db,"users")); us.forEach(u=>{ if(u.id!==currentUser.uid) users.push({uid:u.id,name:(u.data().displayName||u.id)}); }); }catch(e){}
+    const shared=new Set((m&&m.sharedWith)||[]);
+    const shareRows=users.length?users.map(u=>`<label class="share-row"><input type="checkbox" class="share-ck" value="${u.uid}" ${shared.has(u.uid)?'checked':''}> ${esc(u.name)}</label>`).join(''):'<div class="muted">공유할 다른 사용자가 없어요.</div>';
+    showModal(`<div class="modal-title">${id?'메모 수정':'새 메모'}</div>
+      <div class="form-group"><label>카테고리</label><input id="memo-cat-in" class="mini-input" style="width:100%" placeholder="예: 인사말, 공지, 링크" value="${esc((m&&m.category)||memoCat||'')}"></div>
+      <div class="form-group"><label>제목</label><input id="memo-title-in" class="mini-input" style="width:100%" value="${esc((m&&m.title)||'')}"></div>
+      <div class="form-group"><label>내용 (복사될 글)</label><textarea id="memo-body-in" class="ta" style="height:120px">${esc((m&&m.body)||'')}</textarea></div>
+      <div class="form-group"><label>공유 대상 (기본: 나만)</label><div class="share-list">${shareRows}</div></div>
+      <div class="modal-footer">${id?`<button class="btn btn-danger" onclick="deleteMemo('${id}')">삭제</button>`:''}<button class="btn btn-ghost" onclick="closeModal()">취소</button><button class="btn btn-primary" onclick="saveMemo('${id}')">저장</button></div>`);
+  };
+  window.saveMemo=async(id)=>{
+    const title=$('memo-title-in').value.trim(), body=$('memo-body-in').value, category=$('memo-cat-in').value.trim();
+    if(!title && !body.trim()){ alert('제목이나 내용을 입력하세요'); return; }
+    const sharedWith=[...document.querySelectorAll('.share-ck:checked')].map(c=>c.value);
+    const payload={ owner:currentUser.uid, ownerName:(userProfile&&userProfile.displayName)||'', title, body, category, sharedWith, updatedAt:Timestamp.now() };
+    if(id){ await setDoc(doc(db,"memos",id),payload,{merge:true}); }
+    else { payload.createdAt=Timestamp.now(); await addDoc(collection(db,"memos"),payload); }
+    closeModal(); renderMemoPanel();
+  };
+  window.deleteMemo=async(id)=>{ if(!confirm('이 메모를 삭제할까요?')) return; await deleteDoc(doc(db,"memos",id)); closeModal(); renderMemoPanel(); };
+
   // ── 화면 전환 ──
-  function resetAppUI(){ unsubListeners.forEach(u=>{try{u();}catch(e){}}); unsubListeners=[]; selectedStaffUid=null; todayTasks=[]; if($('sidebar'))$('sidebar').innerHTML=''; if($('main-content'))$('main-content').innerHTML=''; }
+  function resetAppUI(){ unsubListeners.forEach(u=>{try{u();}catch(e){}}); unsubListeners=[]; selectedStaffUid=null; todayTasks=[]; if($('sidebar'))$('sidebar').innerHTML=''; if($('main-content'))$('main-content').innerHTML=''; if($('memo-panel'))$('memo-panel').innerHTML=''; }
   function showLogin(){ resetAppUI(); $('login-screen').style.display='flex'; $('app-screen').style.display='none'; }
   function showApp(){
     resetAppUI();
     $('login-screen').style.display='none'; $('app-screen').style.display='flex';
     $('user-name-badge').textContent=userProfile.displayName||currentUser.email;
+    { const _nb=$('user-name-badge'); if(_nb){ _nb.style.cursor='pointer'; _nb.title='내 계정 (이름·비밀번호 변경)'; _nb.style.textDecoration='underline'; _nb.onclick=openMyAccount; } }
     $('role-badge').textContent=userRole==='boss'?'관리자':'직원';
     $('role-badge').className='role-badge '+(userRole==='boss'?'boss':'');
     if(userRole==='boss') renderBossView(); else renderStaffView(currentUser.uid);
+    renderMemoPanel();
   }
 
   // ══════════════════════════════════════
@@ -1013,6 +1125,7 @@
           <button class="btn btn-ghost" onclick="openRoutineManager('${s.uid}')">필수 업무</button>
           <button class="btn btn-primary" onclick="openBossCommentModal('${s.uid}','${esc(s.displayName||s.email)}')">📣 지시 보내기</button>
           <button class="btn btn-ghost" onclick="bossShowHistory('${s.uid}')">지난 기록</button>
+          <button class="btn btn-ghost" onclick="openStaffAccount('${s.uid}','${esc(s.displayName||s.email)}',${s.active!==false})">계정 관리</button>
         </div>
       </div>
       <div id="boss-history-wrap"></div>
@@ -1187,7 +1300,27 @@ body{font-family:-apple-system,'Malgun Gothic','맑은 고딕',sans-serif;backgr
 .view-all:hover{background:var(--accent-bg);}
 
 /* 메인 */
-#main-content{flex:1;overflow-y:auto;padding:22px 26px;max-width:920px;margin:0 auto;width:100%;}
+#main-content{flex:1;overflow-y:auto;padding:22px 26px;width:100%;min-width:0;}
+/* 오른쪽 메모장 */
+#memo-panel{width:310px;flex-shrink:0;border-left:1px solid var(--border);background:var(--surface);overflow-y:auto;padding:14px 14px 40px;}
+#memo-panel.hidden{display:none;}
+.memo-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;}
+.memo-title{font-size:14px;font-weight:800;}
+.memo-cats{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px;}
+.memo-cat{font-size:11.5px;font-weight:600;color:var(--text-2);background:var(--surface-2);border:1px solid var(--border);border-radius:20px;padding:3px 10px;cursor:pointer;}
+.memo-cat.active{background:var(--accent);color:#fff;border-color:var(--accent);}
+.memo-card{background:var(--surface-2);border:1px solid var(--border);border-radius:10px;padding:10px 11px;margin-bottom:9px;}
+.memo-card .mc-top{display:flex;align-items:flex-start;justify-content:space-between;gap:6px;}
+.memo-card .mc-title{font-size:13px;font-weight:700;color:var(--text);word-break:break-word;}
+.memo-card .mc-cat{font-size:10px;color:var(--accent-text);background:var(--accent-bg);border-radius:10px;padding:1px 7px;margin-top:3px;display:inline-block;}
+.memo-card .mc-body{font-size:12px;color:var(--text-2);line-height:1.55;margin-top:6px;white-space:pre-wrap;word-break:break-word;max-height:110px;overflow:auto;}
+.memo-card .mc-actions{display:flex;gap:6px;margin-top:8px;}
+.memo-card .mc-btn{font-size:11px;font-weight:600;border:1px solid var(--border);background:var(--surface);border-radius:7px;padding:4px 9px;cursor:pointer;color:var(--text-2);}
+.memo-card .mc-btn.copy{color:var(--accent-text);border-color:#cdd7f7;background:var(--accent-bg);}
+.memo-card .mc-share{font-size:10px;color:var(--warn);margin-top:4px;}
+.memo-empty{color:var(--text-3);font-size:12px;text-align:center;padding:20px 8px;}
+.share-list{max-height:150px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:8px;}
+.share-row{display:flex;align-items:center;gap:8px;padding:4px 2px;font-size:13px;}
 .muted{color:var(--text-3);font-size:12px;}
 .empty{color:var(--text-3);padding:22px;text-align:center;background:var(--surface);border-radius:10px;border:1px dashed var(--border-strong);font-size:13px;}
 .page-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;}
@@ -1472,6 +1605,7 @@ body{font-family:-apple-system,'Malgun Gothic','맑은 고딕',sans-serif;backgr
   <div class="app-body">
     <div id="sidebar"></div>
     <div id="main-content"></div>
+    <div id="memo-panel"></div>
   </div>
 </div>
 
