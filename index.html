@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- WorkBoard build 2026-07-05b (block colors + easy add(+date dropdown) + done=achievement/carry=alert + comment edit·delete + 프로젝트 rename) -->
+<!-- WorkBoard build 2026-07-05c (지시·커멘트 이력에서 수정·삭제 + 지시모달 현재값·지우기 + 색 진하게(.18/4px) + 팔레트 회색 제거) -->
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
@@ -80,7 +80,7 @@
   let categories=[]; // 주제(카테고리) 목록 캐시
   const collapsedCats=new Set(); // 접힌 주제 그룹
   const expandedSubs=new Set();  // 하위 단계 펼친 항목
-  const CAT_COLORS=['#4f6bed','#8b5cf6','#0ea5a4','#d97706','#e0567f','#16a34a','#0284c7','#64748b'];
+  const CAT_COLORS=['#4f6bed','#8b5cf6','#0ea5a4','#d97706','#e0567f','#16a34a','#0284c7','#db2777'];
 
   // ── 유틸 ──
   const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;  // 로컬 날짜(타임존 안전)
@@ -516,7 +516,7 @@
         const H=Math.max(h,16); const showEs=H>=28; const titleLines=Math.max(1,Math.floor((H-(showEs?13:2))/13));
         const w=100/o.cols, left=w*o.col;
         const div=el('div','evt'+(state?' '+state:''));
-        div.style.cssText=`top:${top}px;height:${H}px;left:calc(${left}% + 2px);width:calc(${w}% - 4px);background:${hexA(c,.14)};border-left-color:${c}`;
+        div.style.cssText=`top:${top}px;height:${H}px;left:calc(${left}% + 2px);width:calc(${w}% - 4px);background:${hexA(c,.18)};border-left-color:${c}`;
         let sb=''; if(st==='done') sb='<span class="badge b-done">✓</span>'; else if(help) sb='<span class="badge b-help" title="막힌 업무">!</span>'; else if(carried) sb='<span class="badge b-carry" title="이월된 업무">이월</span>';
         const chat = nc?'<span class="badge b-chat">💬</span>':'';
         div.innerHTML=`<div class="et" style="-webkit-line-clamp:${titleLines}">${esc(ev.title)}</div>${showEs?`<div class="es">${minHM(a)}–${minHM(b)}${ev.important?' <span class="star">★</span>':''}</div>`:''}${chat}${sb}`;
@@ -612,6 +612,7 @@
     if(!t){ alert('내용이 비었어요. 지우려면 삭제를 눌러주세요.'); return; }
     cur[i]={...c, text:t, edited:true, editedAt:Timestamp.now()};
     try{ await setDoc(ref,{comments:cur},{merge:true}); }catch(e){ alert(fbErr(e)); }
+    if(wbTab==='comments') renderCommentsTab(wbUid||currentUser.uid);
   };
   window.deleteBlockMsg = async (slotId,i)=>{
     const ref=doc(db,"slots",slotId); const snap=await getDoc(ref); if(!snap.exists()) return; const cur=(snap.data().comments)||[];
@@ -620,6 +621,7 @@
     if(!confirm('이 메시지를 삭제할까요?')) return;
     cur.splice(i,1);
     try{ await setDoc(ref,{comments:cur},{merge:true}); }catch(e){ alert(fbErr(e)); }
+    if(wbTab==='comments') renderCommentsTab(wbUid||currentUser.uid);
   };
   window.saveBlock = async (slotId)=>{
     const title=$('bd-title').value.trim(); if(!title){ alert('제목을 입력하세요'); return; }
@@ -728,9 +730,9 @@
     const items=[];
     try{
       const sSnap=await getDocs(query(collection(db,"slots"),where("uid","==",uid)));
-      sSnap.forEach(d=>{ const s=d.data(); (s.comments||[]).forEach(c=>{ items.push({date:s.date||'', at:(c.at&&c.at.seconds)||0, task:s.title||'(제목 없음)', by:c.byName||'', role:c.role||'', text:c.text||'', kind:'chat'}); }); });
+      sSnap.forEach(d=>{ const s=d.data(); (s.comments||[]).forEach((c,ci)=>{ items.push({date:s.date||'', at:(c.at&&c.at.seconds)||0, task:s.title||'(제목 없음)', by:c.byName||'', byUid:c.by||'', role:c.role||'', text:c.text||'', kind:'chat', slotId:d.id, idx:ci}); }); });
       const dSnap=await getDocs(query(collection(db,"daily"),where("uid","==",uid)));
-      dSnap.forEach(d=>{ const v=d.data(); if((v.bossComment||'').trim()) items.push({date:v.date||'', at:(v.bossCommentAt&&v.bossCommentAt.seconds)||0, task:'하루 전체 지시', by:'관리자', role:'boss', text:v.bossComment, kind:'order'}); });
+      dSnap.forEach(d=>{ const v=d.data(); if((v.bossComment||'').trim()) items.push({date:v.date||'', at:(v.bossCommentAt&&v.bossCommentAt.seconds)||0, task:'하루 전체 지시', by:'관리자', role:'boss', text:v.bossComment, kind:'order', dailyId:d.id}); });
     }catch(e){ if(wbTab==='comments') p.innerHTML='<div class="link-conn">💬 커멘트 이력</div><div class="empty">불러오기 실패: '+((e&&e.code)||(e&&e.message)||'')+'</div>'; return; }
     if(wbTab!=='comments') return;
     items.sort((a,b)=> (b.date||'').localeCompare(a.date||'') || (b.at-a.at));
@@ -740,10 +742,26 @@
     if(!items.length) html+='<div class="empty">아직 커멘트가 없어요. 업무 블록을 눌러 대화를 남기면 여기 쌓입니다.</div>';
     dates.forEach(dt=>{ html+=`<div class="group-head static" style="margin-top:10px"><span class="grp-name">${dt?dateLabel(dt):'날짜 없음'}</span><span class="grp-count">${groups[dt].length}건</span></div>`;
       groups[dt].forEach(it=>{ const t=it.at?new Date(it.at*1000):null; const tt=t?`${String(t.getHours()).padStart(2,'0')}:${String(t.getMinutes()).padStart(2,'0')}`:'';
-        html+=`<div class="cm-row"><div class="cm-task">${it.kind==='order'?'📣':'💬'} ${esc(it.task)}</div><div class="cm-text">${esc(it.text)}</div><div class="cm-meta">${esc(it.by||(it.role==='boss'?'관리자':'직원'))}${tt?' · '+tt:''}</div></div>`; });
+        let acts='';
+        if(it.kind==='order'){ if(userRole==='boss') acts=`<div class="cm-acts"><span onclick="cmEditOrder('${it.dailyId}')">수정</span><span onclick="cmDelOrder('${it.dailyId}')">삭제</span></div>`; }
+        else { const mine=it.byUid===currentUser.uid; const canDel=mine||userRole==='boss'; if(mine||canDel) acts=`<div class="cm-acts">${mine?`<span onclick="editBlockMsg('${it.slotId}',${it.idx})">수정</span>`:''}${canDel?`<span onclick="deleteBlockMsg('${it.slotId}',${it.idx})">삭제</span>`:''}</div>`; }
+        html+=`<div class="cm-row"><div class="cm-task">${it.kind==='order'?'📣':'💬'} ${esc(it.task)}</div><div class="cm-text">${esc(it.text)}</div><div class="cm-meta">${esc(it.by||(it.role==='boss'?'관리자':'직원'))}${tt?' · '+tt:''}</div>${acts}</div>`; });
     });
     p.innerHTML=html;
   }
+  window.cmEditOrder = async (dailyId)=>{
+    const ref=doc(db,"daily",dailyId); const snap=await getDoc(ref); if(!snap.exists()) return;
+    const cur=snap.data().bossComment||''; const nv=prompt('지시 내용 수정', cur); if(nv==null) return; const t=nv.trim();
+    if(!t){ if(!confirm('내용이 비었어요. 이 지시를 삭제할까요?')) return; }
+    try{ await setDoc(ref,{bossComment:t, bossCommentAt:Timestamp.now(), bossCommentBy:currentUser.uid},{merge:true}); }catch(e){ alert(fbErr(e)); return; }
+    if(wbTab==='comments') renderCommentsTab(wbUid||currentUser.uid);
+  };
+  window.cmDelOrder = async (dailyId)=>{
+    if(!confirm('이 지시를 삭제할까요? (직원 화면의 📣 지시도 사라집니다)')) return;
+    const ref=doc(db,"daily",dailyId);
+    try{ await setDoc(ref,{bossComment:'', bossCommentAt:Timestamp.now(), bossCommentBy:currentUser.uid},{merge:true}); }catch(e){ alert(fbErr(e)); return; }
+    if(wbTab==='comments') renderCommentsTab(wbUid||currentUser.uid);
+  };
 
   // ── 자동 이월: 이전 마지막 근무일의 미완 → 오늘(원본 보존, 중복 방지) ──
   async function runCarryover(uid, dateStr){
@@ -1351,10 +1369,15 @@
     await setDoc(doc(db,"slots",id),{uid,date,plannedTime:time||'',title,memo,category,biz,status:'todo',important:false,weekStart:weekStart(new Date(date)),assignedBy:currentUser.uid,updatedAt:Timestamp.now()},{merge:true});
     closeModal(); alert('업무가 배정되었습니다.'); if(_curStaff && _curStaff.uid===uid) renderBossStaffDetail(_curStaff);
   };
-  window.openBossCommentModal = (uid,name) => {
-    showModal(`<div class="modal-title">지시 보내기 — ${name}</div><div class="form-group"><label>지시 내용</label><textarea id="direct-msg" class="ta" style="height:120px" placeholder="직원에게 전달할 지시사항"></textarea></div><div class="modal-footer"><button class="btn btn-ghost" onclick="closeModal()">취소</button><button class="btn btn-primary" onclick="sendDirectMessage('${uid}')">전송</button></div>`);
+  window.openBossCommentModal = async (uid,name) => {
+    let cur=''; try{ const s=await getDoc(doc(db,"daily",`${uid}_${today()}`)); if(s.exists()) cur=s.data().bossComment||''; }catch(e){}
+    showModal(`<div class="modal-title">지시 보내기 — ${name}</div>
+      <div class="muted" style="margin-bottom:8px">오늘 지시는 직원 화면 위에 📣로 실시간으로 뜹니다.${cur?' 지금 지시가 있어요 — 아래에서 고치거나 지울 수 있어요.':''}</div>
+      <div class="form-group"><label>지시 내용</label><textarea id="direct-msg" class="ta" style="height:120px" placeholder="직원에게 전달할 지시사항">${esc(cur)}</textarea></div>
+      <div class="modal-footer">${cur?`<button class="btn btn-danger" onclick="clearDirectMessage('${uid}')">지시 지우기</button>`:''}<button class="btn btn-ghost" onclick="closeModal()">취소</button><button class="btn btn-primary" onclick="sendDirectMessage('${uid}')">${cur?'수정해서 보내기':'전송'}</button></div>`);
   };
   window.sendDirectMessage = async (uid) => { const msg=$('direct-msg')?.value.trim()||''; if(!msg){ alert('내용을 입력하세요'); return; } await setDoc(doc(db,"daily",`${uid}_${today()}`),{bossComment:msg,bossCommentAt:Timestamp.now(),bossCommentBy:currentUser.uid},{merge:true}); closeModal(); alert('지시가 전달되었습니다.'); };
+  window.clearDirectMessage = async (uid) => { if(!confirm('오늘 지시를 지울까요? (직원 화면의 📣도 사라집니다)')) return; await setDoc(doc(db,"daily",`${uid}_${today()}`),{bossComment:'',bossCommentAt:Timestamp.now(),bossCommentBy:currentUser.uid},{merge:true}); closeModal(); };
 
   async function renderTeamOverview(staffList){
     document.querySelectorAll('.staff-item').forEach(i=>i.classList.remove('active'));
@@ -1724,13 +1747,16 @@ body{font-family:-apple-system,'Malgun Gothic','맑은 고딕',sans-serif;backgr
 .cm-task{font-size:12px;font-weight:700;color:var(--accent-text);}
 .cm-text{font-size:13.5px;color:var(--text);line-height:1.5;margin-top:4px;white-space:pre-wrap;word-break:break-word;}
 .cm-meta{font-size:11px;color:var(--text-3);margin-top:4px;}
+.cm-acts{display:flex;gap:14px;margin-top:7px;padding-top:7px;border-top:1px solid var(--border);}
+.cm-acts span{font-size:12px;color:var(--text-3);cursor:pointer;font-weight:600;}
+.cm-acts span:hover{color:var(--accent);text-decoration:underline;}
 .day-col{position:relative;border-left:1px solid var(--border);cursor:crosshair;
   background-image:
     repeating-linear-gradient(to bottom,transparent 0,transparent 87px,var(--border) 87px,var(--border) 88px),
     repeating-linear-gradient(to bottom,transparent 0,transparent 43px,#eef1f6 43px,#eef1f6 44px);}
 .day-col.today{background-color:#f7f9ff;}
 .evt{position:absolute;border-radius:7px;padding:3px 6px 3px 8px;font-size:11px;line-height:1.18;overflow:hidden;cursor:pointer;
-  border:1px solid rgba(30,40,80,.06);border-left:3px solid #64748b;box-shadow:0 1px 2px rgba(30,40,80,.05);transition:box-shadow .12s,transform .12s;}
+  border:1px solid rgba(30,40,80,.06);border-left:4px solid #64748b;box-shadow:0 1px 2px rgba(30,40,80,.05);transition:box-shadow .12s,transform .12s;}
 .evt:hover{box-shadow:0 4px 10px rgba(30,40,80,.16);transform:translateY(-1px);z-index:7;}
 .evt .et{font-weight:700;color:var(--text);overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;word-break:break-word;}
 .evt .es{font-size:9.5px;color:var(--text-3);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums;}
