@@ -147,6 +147,7 @@
           <button class="wb-tabbtn" id="wt-fixed" onclick="wbSwitch('fixed')">📌 일일 고정업무 <span class="cnt" id="cnt-fixed"></span></button>
           <button class="wb-tabbtn" id="wt-today" onclick="wbSwitch('today')">▶ 오늘 진행중 <span class="cnt" id="cnt-today"></span></button>
           <button class="wb-tabbtn" id="wt-plan" onclick="wbSwitch('plan')">🌙 내일 계획 <span class="cnt" id="cnt-plan"></span></button>
+          <button class="wb-tabbtn" id="wt-attend" onclick="wbSwitch('attend')">🕘 근태</button>
         </div>
       </div>
       <div id="boss-msg-box"></div>
@@ -169,7 +170,7 @@
     wbMount(uid, userProfile);
   }
   window.wbSwitch = (tab) => { wbTab=tab;
-    ['cal','fixed','today','plan'].forEach(t=>{ const b=$('wt-'+t); if(b)b.classList.toggle('active',t===tab); });
+    ['cal','fixed','today','plan','attend'].forEach(t=>{ const b=$('wt-'+t); if(b)b.classList.toggle('active',t===tab); });
     wbRenderActive();
   };
   function wbRenderActive(){
@@ -178,6 +179,7 @@
     else if(wbTab==='fixed'){ p.innerHTML='<div class="link-conn">🔗 여기 체크는 <b>캘린더·오늘 진행중</b>과 연동됩니다.</div><div id="routines-box"></div>'; loadRoutinesChecklist(uid,'routines-box',today()); }
     else if(wbTab==='today') renderTodayTab(uid);
     else if(wbTab==='plan') renderPlanTab(uid);
+    else if(wbTab==='attend') renderAttendTab(uid);
   }
   // ── 전체 실시간 리스너(이번 주 slots · 오늘 daily · routines) ──
   function wbStartRealtime(uid){
@@ -248,7 +250,7 @@
     const tds=today();
     const rows=Math.max(1,Math.round((eMin-sMin)/CAL_STEP));
     const legend=categories.length?('<div class="legend">'+categories.map(c=>`<span class="item"><span class="sw" style="background:${c.color||'#cbd2dc'}"></span>${esc(c.name)}</span>`).join('')+`<span class="hint">근무 ${minHM(sMin)}–${minHM(eMin)} · 30분 · 빈칸 드래그로 추가</span></div>`):`<div class="legend"><span class="hint">근무 ${minHM(sMin)}–${minHM(eMin)} · 30분 · 빈칸 드래그로 추가 · 주제는 '오늘 진행중'에서 관리</span></div>`;
-    let timeCol='<div class="time-col" style="height:'+(rows*CAL_ROWH)+'px">';
+    let timeCol='<div class="cal-tcol" style="height:'+(rows*CAL_ROWH)+'px">';
     for(let m=sMin;m<eMin;m+=CAL_STEP){ timeCol+=`<div class="tl" style="height:${CAL_ROWH}px">${m%60===0?minHM(m):''}</div>`; }
     timeCol+='</div>';
     let cols='';
@@ -364,16 +366,7 @@
   async function renderTodayTab(uid){
     const p=$('wb-panel'); const ws=(wbProfile&&wbProfile.workStart)||DEFAULT_START, we=(wbProfile&&wbProfile.workEnd)||DEFAULT_END;
     p.innerHTML=`
-      <div class="link-conn">🔗 캘린더의 오늘 업무가 여기 <b>주제별</b>로 모입니다. 상태를 바꾸면 캘린더 음영도 같이 바뀝니다.</div>
-      <div class="row-between soft-card" style="padding:10px 14px;margin-bottom:14px">
-        <div class="clock-line" id="clock-status">아직 출근 전</div>
-        <div class="row" style="gap:6px">
-          <input id="work-start" type="time" class="mini-input" value="${ws}"><span class="muted">~</span><input id="work-end" type="time" class="mini-input" value="${we}">
-          <button class="btn btn-ghost" onclick="saveWorkHours('${uid}')">시간</button>
-          <button class="btn btn-primary" onclick="doClock('${uid}','in')">출근</button>
-          <button class="btn btn-ghost" onclick="doClock('${uid}','out')">퇴근</button>
-        </div>
-      </div>
+      <div class="link-conn">🔗 캘린더의 오늘 업무가 여기 <b>주제별</b>로 모입니다. 상태를 바꾸면 캘린더 음영도 같이 바뀝니다. (출퇴근은 <b>🕘 근태</b> 탭)</div>
       <div class="sec-head"><span class="sec-title">오늘 할 일 <span class="muted" style="font-weight:400">· 주제별</span></span><span><span class="link-btn" onclick="openCategoryManager('${uid}')" style="margin-right:12px">주제 관리</span><span id="save-status" class="muted"></span></span></div>
       <div id="task-list"></div>
       <div class="add-row"><i class="add-plus">＋</i><input id="new-task" class="add-input" placeholder="한 줄씩 추가 · Enter" onkeydown="if(event.key==='Enter')addTask('${uid}')"><button class="btn btn-primary" onclick="addTask('${uid}')">추가</button></div>
@@ -415,6 +408,44 @@
         <button class="btn btn-ghost" style="width:100%;margin-top:8px" onclick="addTomorrowTask()">＋ 내일 할 일 추가</button>
       </div>`;
     try { await loadDailyReport(uid, today()); } catch(e){ console.error('[WB] loadDailyReport', e); }
+  }
+
+  // ══════════════════════════════════════
+  //  탭5: 근태(출퇴근)
+  // ══════════════════════════════════════
+  async function renderAttendTab(uid){
+    const p=$('wb-panel'); const prof=wbProfile||{};
+    const ws=prof.workStart||DEFAULT_START, we=prof.workEnd||DEFAULT_END;
+    const wsMon=weekStart(); const wsDate=new Date(wsMon+'T00:00:00'); const days=[];
+    for(let i=0;i<7;i++){ const d=new Date(wsDate); d.setDate(d.getDate()+i); days.push(d.toISOString().slice(0,10)); }
+    let byDate={};
+    try{ const snap=await getDocs(query(collection(db,"daily"),where("uid","==",uid))); snap.forEach(x=>{ const v=x.data(); if(v.date) byDate[v.date]=v; }); }catch(e){ console.error('[WB] attend load',e); }
+    const t0=today();
+    const rows=days.map((ds,i)=>{ const d=byDate[ds]||{}; const dd=new Date(ds+'T00:00:00');
+      const li=lateInfo(d.clockIn, ws);
+      const inTxt = d.clockIn ? `${d.clockIn}${li.late?` <span class="late">지각 ${li.mins}분</span>`:' <span class="ontime">정상</span>'}` : '<span class="muted">-</span>';
+      const outTxt = d.clockOut ? d.clockOut : '<span class="muted">-</span>';
+      const dur = (d.clockIn&&d.clockOut&&toMin(d.clockOut)!=null&&toMin(d.clockIn)!=null) ? Math.max(0, toMin(d.clockOut)-toMin(d.clockIn)) : null;
+      const durTxt = dur!=null ? `${Math.floor(dur/60)}시간 ${String(dur%60).padStart(2,'0')}분` : '<span class="muted">-</span>';
+      return `<tr class="${ds===t0?'att-today':''}"><td>${DAYS[i]} <span class="muted">${dd.getMonth()+1}/${dd.getDate()}</span></td><td>${inTxt}</td><td>${outTxt}</td><td>${durTxt}</td></tr>`;
+    }).join('');
+    p.innerHTML=`
+      <div class="link-conn">🕘 여기서 출퇴근을 찍고, 이번 주 근태를 한눈에 봅니다. (관리자에게 실시간 공유)</div>
+      <div class="row-between soft-card" style="padding:14px 16px;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+        <div class="clock-line" id="clock-status" style="font-size:15px;font-weight:600">아직 출근 전</div>
+        <div class="row" style="gap:6px;flex-wrap:wrap">
+          <span class="muted">근무시간</span>
+          <input id="work-start" type="time" class="mini-input" value="${ws}"><span class="muted">~</span><input id="work-end" type="time" class="mini-input" value="${we}">
+          <button class="btn btn-ghost" onclick="saveWorkHours('${uid}')">저장</button>
+          <button class="btn btn-primary" onclick="doClock('${uid}','in')">🟢 출근</button>
+          <button class="btn btn-ghost" onclick="doClock('${uid}','out')">🔴 퇴근</button>
+        </div>
+      </div>
+      <div class="soft-card">
+        <div class="sec-title" style="margin-bottom:10px">이번 주 근태 <span class="muted">· ${dateLabel(days[0])} ~ ${dateLabel(days[6])}</span></div>
+        <table class="att-table"><thead><tr><th>요일</th><th>출근</th><th>퇴근</th><th>근무시간</th></tr></thead><tbody>${rows}</tbody></table>
+      </div>`;
+    renderClockStatus(byDate[t0]||{});
   }
 
   // ── 자동 이월: 이전 마지막 근무일의 미완 → 오늘(원본 보존, 중복 방지) ──
@@ -466,7 +497,7 @@
     ]);
     todayTasks=[]; snap.forEach(d=>todayTasks.push({id:d.id, ...d.data()}));
     renderTaskList(uid);
-    syncGoals(uid);
+    // ⚠ 렌더 경로에서는 daily에 쓰지 않는다(실시간 리스너 재렌더 → 무한 깜빡임 방지). topGoals 갱신은 실제 변경(중요표시/상태변경) 시에만.
   }
   function sortTasks(a,b){
     if(!!b.important - !!a.important) return (!!b.important)-(!!a.important);
@@ -550,7 +581,11 @@
   // 중요표시 → daily.topGoals 미러(관리자 화면 호환)
   async function syncGoals(uid){
     const goals=todayTasks.filter(t=>t.important).map(t=>({text:t.title, done:t.status==='done'}));
-    try{ await setDoc(doc(db,"daily",`${uid}_${today()}`),{uid,date:today(),topGoals:goals,updatedAt:Timestamp.now()},{merge:true}); }catch(e){}
+    // 값이 실제로 바뀐 경우에만 쓰기(불필요한 실시간 재렌더/루프 방지)
+    const prev=(wbCache&&wbCache.daily&&wbCache.daily.topGoals)||[];
+    if(JSON.stringify(prev)!==JSON.stringify(goals)){
+      try{ await setDoc(doc(db,"daily",`${uid}_${today()}`),{uid,date:today(),topGoals:goals,updatedAt:Timestamp.now()},{merge:true}); }catch(e){}
+    }
     updateMissCheck();
   }
 
@@ -1335,7 +1370,14 @@ body{font-family:-apple-system,'Malgun Gothic','맑은 고딕',sans-serif;backgr
 .cal-head .th .d{font-size:10px;font-weight:500;color:var(--text-3);}
 .cal-head .th.today .d{color:var(--accent);}
 .cal-body{display:grid;grid-template-columns:56px repeat(7,1fr);max-height:calc(100vh - 260px);min-height:420px;overflow-y:auto;position:relative;}
-.time-col .tl{font-size:10.5px;color:var(--text-3);text-align:right;padding-right:6px;transform:translateY(-6px);}
+.cal-tcol{display:block;padding:0;}
+.cal-tcol .tl{font-size:10.5px;color:var(--text-3);text-align:right;padding-right:6px;transform:translateY(-6px);}
+/* 근태 표 */
+.att-table{width:100%;border-collapse:collapse;font-size:13px;}
+.att-table th{text-align:left;font-size:11.5px;font-weight:700;color:var(--text-3);padding:6px 8px;border-bottom:1px solid var(--border);}
+.att-table td{padding:9px 8px;border-bottom:1px solid var(--border);color:var(--text-2);}
+.att-table tr:last-child td{border-bottom:none;}
+.att-table tr.att-today td{background:var(--accent-bg);color:var(--text);font-weight:600;}
 .day-col{position:relative;border-left:1px solid var(--border);background-image:repeating-linear-gradient(to bottom,transparent 0,transparent 43px,var(--border) 43px,var(--border) 44px);cursor:crosshair;}
 .day-col.today{background-color:#fafbff;}
 .evt{position:absolute;left:3px;right:3px;border-radius:7px;padding:4px 7px;font-size:11.5px;line-height:1.25;color:#fff;overflow:hidden;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,.08);}
