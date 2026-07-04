@@ -214,16 +214,19 @@
       <div class="form-group"><label>공유 대상 (기본: 나만)</label><div class="share-list">${shareRows}</div></div>
       <div class="modal-footer">${id?`<button class="btn btn-danger" onclick="deleteMemo('${id}')">삭제</button>`:''}<button class="btn btn-ghost" onclick="closeModal()">취소</button><button class="btn btn-primary" onclick="saveMemo('${id}')">저장</button></div>`);
   };
+  function fbErr(e){ const c=(e&&e.code)||''; if(c.indexOf('permission-denied')>=0) return '저장 권한이 없습니다.\n\n(Firestore 보안 규칙에서 이 기능의 데이터 저장을 아직 허용하지 않았어요. 관리자가 규칙에 memos·businesses 컬렉션 허용을 추가해야 합니다.)'; return '저장 실패: '+((e&&e.message)||c||'알 수 없는 오류'); }
   window.saveMemo=async(id)=>{
     const title=$('memo-title-in').value.trim(), body=$('memo-body-in').value, category=$('memo-cat-in').value.trim();
     if(!title && !body.trim()){ alert('제목이나 내용을 입력하세요'); return; }
     const sharedWith=[...document.querySelectorAll('.share-ck:checked')].map(c=>c.value);
     const payload={ owner:currentUser.uid, ownerName:(userProfile&&userProfile.displayName)||'', title, body, category, sharedWith, updatedAt:Timestamp.now() };
-    if(id){ await setDoc(doc(db,"memos",id),payload,{merge:true}); }
-    else { payload.createdAt=Timestamp.now(); await addDoc(collection(db,"memos"),payload); }
-    closeModal(); renderMemoPanel();
+    try{
+      if(id){ await setDoc(doc(db,"memos",id),payload,{merge:true}); }
+      else { payload.createdAt=Timestamp.now(); await addDoc(collection(db,"memos"),payload); }
+      closeModal(); renderMemoPanel();
+    }catch(e){ alert(fbErr(e)); }
   };
-  window.deleteMemo=async(id)=>{ if(!confirm('이 메모를 삭제할까요?')) return; await deleteDoc(doc(db,"memos",id)); closeModal(); renderMemoPanel(); };
+  window.deleteMemo=async(id)=>{ if(!confirm('이 메모를 삭제할까요?')) return; try{ await deleteDoc(doc(db,"memos",id)); closeModal(); renderMemoPanel(); }catch(e){ alert(fbErr(e)); } };
 
   // ── 화면 전환 ──
   function resetAppUI(){ unsubListeners.forEach(u=>{try{u();}catch(e){}}); unsubListeners=[]; selectedStaffUid=null; todayTasks=[]; if($('sidebar'))$('sidebar').innerHTML=''; if($('main-content'))$('main-content').innerHTML=''; if($('memo-panel'))$('memo-panel').innerHTML=''; }
@@ -252,7 +255,7 @@
   // ── 사업(누드/베품 등) 상위 구분 ──
   let businesses=[];
   let wbBiz=''; try{ wbBiz=localStorage.getItem('wbBiz')||''; }catch(e){}  // ''=통합
-  async function loadBusinesses(){ const s=await getDocs(collection(db,"businesses")); businesses=[]; s.forEach(d=>businesses.push({id:d.id,...d.data()})); businesses.sort((a,b)=>(a.order||0)-(b.order||0)); }
+  async function loadBusinesses(){ try{ const s=await getDocs(collection(db,"businesses")); businesses=[]; s.forEach(d=>businesses.push({id:d.id,...d.data()})); businesses.sort((a,b)=>(a.order||0)-(b.order||0)); }catch(e){ console.error('[WB] loadBusinesses',e); businesses=[]; } }
   const bizMatch=(item)=> !wbBiz || (item&&item.biz)===wbBiz;   // 통합이면 모두, 특정 사업이면 그 사업만
   const bizName=(id)=>{ const b=businesses.find(x=>x.id===id); return b?b.name:''; };
   function renderBizBar(){
@@ -271,7 +274,7 @@
       <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px"><div class="muted" style="margin-bottom:6px">등록됨 (${businesses.length})</div>${businesses.length?rows:'<div class="muted">아직 없음</div>'}</div>
       <div class="modal-footer"><button class="btn btn-ghost" onclick="closeModal()">닫기</button></div>`);
   };
-  window.saveBiz=async()=>{ const n=$('biz-name')?.value.trim(); if(!n){alert('사업 이름을 입력하세요');return;} const color=CAT_COLORS[businesses.length%CAT_COLORS.length]; await addDoc(collection(db,"businesses"),{name:n,color,order:businesses.length,createdBy:currentUser.uid,createdAt:Timestamp.now()}); await loadBusinesses(); openBizManager(); renderBizBar(); };
+  window.saveBiz=async()=>{ const n=$('biz-name')?.value.trim(); if(!n){alert('사업 이름을 입력하세요');return;} const color=CAT_COLORS[businesses.length%CAT_COLORS.length]; try{ await addDoc(collection(db,"businesses"),{name:n,color,order:businesses.length,createdBy:currentUser.uid,createdAt:Timestamp.now()}); await loadBusinesses(); openBizManager(); renderBizBar(); }catch(e){ alert(fbErr(e)); } };
   window.deleteBiz=async(id)=>{ if(!confirm('이 사업을 삭제할까요? (기존 업무의 사업 태그는 남지만 목록에선 사라집니다)'))return; await deleteDoc(doc(db,"businesses",id)); await loadBusinesses(); openBizManager(); renderBizBar(); };
   const bizOptions=(sel)=>'<option value="">(사업 미지정)</option>'+businesses.map(b=>`<option value="${b.id}" ${b.id===sel?'selected':''}>${esc(b.name)}</option>`).join('');
 
