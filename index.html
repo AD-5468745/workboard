@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- WorkBoard build 2026-07-05a (calendar redesign: sticky-align + overlap + light blocks; comment-history tab; memo image paste; notifications) -->
+<!-- WorkBoard build 2026-07-05b (block colors + easy add(+date dropdown) + done=achievement/carry=alert + comment edit·delete + 프로젝트 rename) -->
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
@@ -287,21 +287,21 @@
     const bar=$('biz-bar'); if(!bar) return;
     const btn=(id,name)=>`<button class="biz-btn${wbBiz===id?' active':''}" onclick="wbSetBiz('${id}')">${esc(name)}</button>`;
     let h=btn('','전체 통합')+businesses.map(b=>btn(b.id,b.name)).join('');
-    if(userRole==='boss') h+=`<button class="biz-btn ghost" onclick="openBizManager()">⚙ 사업 관리</button>`;
+    if(userRole==='boss') h+=`<button class="biz-btn ghost" onclick="openBizManager()">⚙ 프로젝트 관리</button>`;
     bar.innerHTML=h;
   }
   window.wbSetBiz=(id)=>{ wbBiz=id; try{localStorage.setItem('wbBiz',id);}catch(e){} renderBizBar(); wbRenderActive(); };
   window.openBizManager=async()=>{ await loadBusinesses();
     const rows=businesses.map(b=>`<div class="row-between" style="padding:7px 0;border-bottom:1px solid var(--border)"><span><span class="grp-dot" style="background:${b.color||'#cbd2dc'}"></span> ${esc(b.name)}</span><button class="btn btn-danger" onclick="deleteBiz('${b.id}')">삭제</button></div>`).join('');
-    showModal(`<div class="modal-title">사업 관리</div>
-      <div class="muted" style="margin-bottom:10px">사업(예: 누드, 베품)을 만들면 상단에서 사업별로 나눠 볼 수 있어요.</div>
-      <div class="form-group"><label>새 사업</label><div class="row" style="gap:6px"><input id="biz-name" class="mini-input" style="flex:1" placeholder="예: 누드"><button class="btn btn-primary" onclick="saveBiz()">＋ 추가</button></div></div>
+    showModal(`<div class="modal-title">프로젝트 관리</div>
+      <div class="muted" style="margin-bottom:10px">프로젝트(예: 누드TV, 베팅의품격)를 만들면 상단에서 프로젝트별로 나눠 볼 수 있어요.</div>
+      <div class="form-group"><label>새 프로젝트</label><div class="row" style="gap:6px"><input id="biz-name" class="mini-input" style="flex:1" placeholder="예: 누드TV"><button class="btn btn-primary" onclick="saveBiz()">＋ 추가</button></div></div>
       <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px"><div class="muted" style="margin-bottom:6px">등록됨 (${businesses.length})</div>${businesses.length?rows:'<div class="muted">아직 없음</div>'}</div>
       <div class="modal-footer"><button class="btn btn-ghost" onclick="closeModal()">닫기</button></div>`);
   };
-  window.saveBiz=async()=>{ const n=$('biz-name')?.value.trim(); if(!n){alert('사업 이름을 입력하세요');return;} const color=CAT_COLORS[businesses.length%CAT_COLORS.length]; try{ await addDoc(collection(db,"businesses"),{name:n,color,order:businesses.length,createdBy:currentUser.uid,createdAt:Timestamp.now()}); await loadBusinesses(); openBizManager(); renderBizBar(); }catch(e){ alert(fbErr(e)); } };
-  window.deleteBiz=async(id)=>{ if(!confirm('이 사업을 삭제할까요? (기존 업무의 사업 태그는 남지만 목록에선 사라집니다)'))return; await deleteDoc(doc(db,"businesses",id)); await loadBusinesses(); openBizManager(); renderBizBar(); };
-  const bizOptions=(sel)=>'<option value="">(사업 미지정)</option>'+businesses.map(b=>`<option value="${b.id}" ${b.id===sel?'selected':''}>${esc(b.name)}</option>`).join('');
+  window.saveBiz=async()=>{ const n=$('biz-name')?.value.trim(); if(!n){alert('프로젝트 이름을 입력하세요');return;} const color=CAT_COLORS[businesses.length%CAT_COLORS.length]; try{ await addDoc(collection(db,"businesses"),{name:n,color,order:businesses.length,createdBy:currentUser.uid,createdAt:Timestamp.now()}); await loadBusinesses(); openBizManager(); renderBizBar(); }catch(e){ alert(fbErr(e)); } };
+  window.deleteBiz=async(id)=>{ if(!confirm('이 프로젝트를 삭제할까요? (기존 업무의 프로젝트 태그는 남지만 목록에선 사라집니다)'))return; await deleteDoc(doc(db,"businesses",id)); await loadBusinesses(); openBizManager(); renderBizBar(); };
+  const bizOptions=(sel)=>'<option value="">(프로젝트 미지정)</option>'+businesses.map(b=>`<option value="${b.id}" ${b.id===sel?'selected':''}>${esc(b.name)}</option>`).join('');
 
   function wbWorkspaceMarkup(){
     return `
@@ -449,6 +449,10 @@
   const slotEndMin=(s)=>{ const e=toMin(s.endTime); if(e!=null) return e; const st=slotStartMin(s); return st!=null?st+30:null; };
   const CAL_ROWH=44, CAL_STEP=30;
   const hexA=(h,a)=>{ h=(h||'').replace('#',''); if(h.length!==6) return 'rgba(100,116,139,'+a+')'; const r=parseInt(h.slice(0,2),16),g=parseInt(h.slice(2,4),16),b=parseInt(h.slice(4,6),16); return `rgba(${r},${g},${b},${a})`; };
+  // 주제 없는 업무도 밝은 색으로 구분(제목 해시로 안정적 배정)
+  const BLOCK_COLORS=['#4f6bed','#16a34a','#d97706','#8b5cf6','#e11d48','#0891b2','#7c3aed','#059669','#db2777','#0ea5a4','#2563eb','#ea580c'];
+  const hashStr=(s)=>{ s=String(s||''); let h=0; for(let i=0;i<s.length;i++){ h=(h*31+s.charCodeAt(i))>>>0; } return h; };
+  const blockColor=(ev,cm)=> (ev.category && cm[ev.category] && cm[ev.category].color) ? cm[ev.category].color : BLOCK_COLORS[hashStr(ev.title||ev.id||'')%BLOCK_COLORS.length];
 
   async function renderCalendar(uid){
     const p=$('wb-panel'); if(!p) return;
@@ -472,8 +476,9 @@
     for(let i=0;i<7;i++){ const isT=dayList[i]===tds; cols+=`<div class="day-col${isT?' today':''}" data-date="${dayList[i]}" data-idx="${i}" style="height:${rows*CAL_ROWH}px"></div>`; }
     if(wbTab!=='cal') return;   // 렌더 도중 다른 탭으로 바뀌었으면 덮어쓰지 않음(경합 방지)
     p.innerHTML=`
-      <div class="header-row" style="margin-bottom:10px">
+      <div class="header-row" style="margin-bottom:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <div class="wknav"><button onclick="wbWeek(-1)">‹ 이전주</button><button onclick="wbWeek(0)">이번주</button><button onclick="wbWeek(1)">다음주 ›</button><span class="muted" style="margin-left:6px">${dateLabel(dayList[0])} – ${dateLabel(dayList[6])}</span></div>
+        <button class="btn btn-primary" style="margin-left:auto" onclick="openNewBlock('${uid}')">＋ 업무 추가</button></div>
       </div>
       ${legend}
       <div class="cal-card">
@@ -504,13 +509,17 @@
       evs.forEach(o=>{
         const ev=o.ev, a=o.a, b=o.b;
         const top=(a-sMin)/CAL_STEP*CAL_ROWH, h=(b-a)/CAL_STEP*CAL_ROWH-3;
-        const c=(ev.category&&cm[ev.category])?cm[ev.category].color:'#64748b';
         const st=ev.status||'todo'; const nc=(ev.comments||[]).length;
+        const carried=!!(ev.carriedFrom||ev.fromPlan), help=!!ev.needsHelp;
+        let state=''; if(st==='done') state='done'; else if(help) state='help'; else if(carried) state='carry';
+        const c = st==='done' ? '#16a34a' : blockColor(ev,cm);   // 완료=초록(성취), 그 외=주제·자동색
         const H=Math.max(h,16); const showEs=H>=28; const titleLines=Math.max(1,Math.floor((H-(showEs?13:2))/13));
         const w=100/o.cols, left=w*o.col;
-        const div=el('div','evt'+(st==='done'?' done':''));
-        div.style.cssText=`top:${top}px;height:${H}px;left:calc(${left}% + 2px);width:calc(${w}% - 4px);background:${hexA(c,.13)};border-left-color:${c}`;
-        div.innerHTML=`<div class="et" style="-webkit-line-clamp:${titleLines}">${esc(ev.title)}</div>${showEs?`<div class="es">${minHM(a)}–${minHM(b)}${ev.important?' <span class="star">★</span>':''}</div>`:''}${st==='done'?'<span class="badge">✓</span>':(nc?'<span class="badge">💬</span>':'')}`;
+        const div=el('div','evt'+(state?' '+state:''));
+        div.style.cssText=`top:${top}px;height:${H}px;left:calc(${left}% + 2px);width:calc(${w}% - 4px);background:${hexA(c,.14)};border-left-color:${c}`;
+        let sb=''; if(st==='done') sb='<span class="badge b-done">✓</span>'; else if(help) sb='<span class="badge b-help" title="막힌 업무">!</span>'; else if(carried) sb='<span class="badge b-carry" title="이월된 업무">이월</span>';
+        const chat = nc?'<span class="badge b-chat">💬</span>':'';
+        div.innerHTML=`<div class="et" style="-webkit-line-clamp:${titleLines}">${esc(ev.title)}</div>${showEs?`<div class="es">${minHM(a)}–${minHM(b)}${ev.important?' <span class="star">★</span>':''}</div>`:''}${chat}${sb}`;
         div.addEventListener('click',(e)=>{ e.stopPropagation(); openBlockDetail(uid, ev.id); });
         col.appendChild(div);
       });
@@ -534,15 +543,21 @@
   }
   window.openNewBlock = async (uid, ds, startT, endT)=>{
     await loadCategories(); await loadBusinesses();
-    showModal(`<div class="modal-title">새 업무 — ${ds} ${startT}~${endT}</div>
+    const ws=wbWeekStart||weekStart(); const wsDate=new Date(ws+'T00:00:00'); const days=[];
+    for(let i=0;i<7;i++){ const dd=new Date(wsDate); dd.setDate(dd.getDate()+i); days.push(ymd(dd)); }
+    if(!ds || !days.includes(ds)) ds = days.includes(today()) ? today() : days[0];
+    const dateOpts=days.map((d,i)=>{ const dd=new Date(d+'T00:00:00'); return `<option value="${d}" ${d===ds?'selected':''}>${DAYS[i]} ${dd.getMonth()+1}/${dd.getDate()}</option>`; }).join('');
+    startT=startT||'09:00'; endT=endT||'09:30';
+    showModal(`<div class="modal-title">새 업무 추가</div>
       <div class="form-group"><label>업무 내용</label><input id="nb-title" class="mini-input" style="width:100%" placeholder="무엇을 할까요?"></div>
-      <div class="form-group"><label>사업</label><select id="nb-biz" class="mini-input" style="width:100%">${bizOptions(wbBiz)}</select></div>
-      <div class="form-group"><label>주제 (선택)</label><div class="row" style="gap:6px"><select id="nb-cat" class="mini-input" style="flex:1">${catOptions('')}</select><button type="button" class="btn btn-ghost" onclick="newCatInline('nb-cat')">＋ 새 주제</button></div></div>
-      <div class="row" style="gap:6px"><div class="form-group" style="flex:1"><label>시작</label><input id="nb-start" type="time" step="1800" class="mini-input" style="width:100%" value="${startT}"></div><div class="form-group" style="flex:1"><label>종료</label><input id="nb-end" type="time" step="1800" class="mini-input" style="width:100%" value="${endT}"></div></div>
-      <div class="modal-footer"><button class="btn btn-ghost" onclick="closeModal()">취소</button><button class="btn btn-primary" onclick="saveNewBlock('${uid}','${ds}')">추가</button></div>`);
+      <div class="row" style="gap:6px"><div class="form-group" style="flex:1.2"><label>날짜(요일)</label><select id="nb-date" class="mini-input" style="width:100%">${dateOpts}</select></div><div class="form-group" style="flex:1"><label>시작</label><input id="nb-start" type="time" step="1800" class="mini-input" style="width:100%" value="${startT}"></div><div class="form-group" style="flex:1"><label>종료</label><input id="nb-end" type="time" step="1800" class="mini-input" style="width:100%" value="${endT}"></div></div>
+      <div class="form-group"><label>프로젝트</label><select id="nb-biz" class="mini-input" style="width:100%">${bizOptions(wbBiz)}</select></div>
+      <div class="form-group"><label>주제·색 (선택)</label><div class="row" style="gap:6px"><select id="nb-cat" class="mini-input" style="flex:1">${catOptions('')}</select><button type="button" class="btn btn-ghost" onclick="newCatInline('nb-cat')">＋ 새 주제</button></div></div>
+      <div class="modal-footer"><button class="btn btn-ghost" onclick="closeModal()">취소</button><button class="btn btn-primary" onclick="saveNewBlock('${uid}')">추가</button></div>`);
     setTimeout(()=>{ const t=$('nb-title'); if(t)t.focus(); },50);
   };
-  window.saveNewBlock = async (uid, ds)=>{
+  window.saveNewBlock = async (uid)=>{
+    const ds=$('nb-date')?.value || today();
     const title=$('nb-title').value.trim(); if(!title){ alert('업무 내용을 입력하세요'); return; }
     const st=$('nb-start').value, en=$('nb-end').value; if(st&&en&&en<=st){ alert('종료가 시작보다 늦어야 합니다'); return; }
     const id=`${uid}_${ds}_${newKey()}`;
@@ -554,7 +569,7 @@
   };
 
   // ── 블록 상세 + 실시간 대화 ──
-  let _threadUnsub=null;
+  let _threadUnsub=null, _threadSlotId=null;
   window.openBlockDetail = async (uid, slotId)=>{
     const ref=doc(db,"slots",slotId); const snap=await getDoc(ref); if(!snap.exists()){ alert('이미 삭제된 업무입니다.'); return; }
     const d=snap.data(); await loadCategories(); await loadBusinesses(); const cm=catMapOf();
@@ -563,7 +578,7 @@
       <div class="muted" style="margin-bottom:12px">${d.category&&cm[d.category]?esc(cm[d.category].name)+' · ':''}${esc(timeTxt)}${d.assignedBy?' · 관리자 배정':''}</div>
       <div class="form-group"><label>상태</label><div class="seg-group modal-seg">${['done','wip','todo'].map(k=>`<button class="seg" data-s="${k}">${k==='todo'?'못함':STATUS_LABEL[k]}</button>`).join('')}</div></div>
       <div class="form-group"><label>제목</label><input id="bd-title" class="mini-input" style="width:100%" value="${esc(d.title)}"></div>
-      <div class="form-group"><label>사업</label><select id="bd-biz" class="mini-input" style="width:100%">${bizOptions(d.biz||'')}</select></div>
+      <div class="form-group"><label>프로젝트</label><select id="bd-biz" class="mini-input" style="width:100%">${bizOptions(d.biz||'')}</select></div>
       <div class="row" style="gap:6px"><div class="form-group" style="flex:1"><label>시작</label><input id="bd-start" type="time" step="1800" class="mini-input" style="width:100%" value="${d.startTime||d.plannedTime||''}"></div><div class="form-group" style="flex:1"><label>종료</label><input id="bd-end" type="time" step="1800" class="mini-input" style="width:100%" value="${d.endTime||''}"></div></div>
       <div class="form-group"><label>💬 대화 <span class="muted">(실시간)</span></label><div class="thread" id="bd-thread"><div class="empty2">불러오는 중…</div></div>
         <div class="reply"><input id="bd-reply" placeholder="메시지 입력 · Enter" onkeydown="if(event.key==='Enter')sendBlockMsg('${slotId}')"><button class="btn btn-primary" onclick="sendBlockMsg('${slotId}')">전송</button></div></div>
@@ -571,13 +586,15 @@
     let sel=st; window.__bdStatus=sel;
     document.querySelectorAll('.modal-seg .seg').forEach(bt=>{ if(bt.dataset.s===sel) bt.classList.add('on','seg-'+sel); bt.addEventListener('click',()=>{ sel=bt.dataset.s; window.__bdStatus=sel; document.querySelectorAll('.modal-seg .seg').forEach(x=>x.className='seg'); bt.classList.add('on','seg-'+sel); }); });
     if(_threadUnsub){try{_threadUnsub();}catch(e){}}
+    _threadSlotId=slotId;
     _threadUnsub=onSnapshot(ref, s=>{ renderThread('bd-thread', (s.exists()&&s.data().comments)||[]); }, e=>{});
   };
   function renderThread(boxId, comments){
     const box=$(boxId); if(!box) return;
     if(!comments.length){ box.innerHTML='<div class="empty2">아직 대화가 없어요. 첫 메시지를 남겨보세요.</div>'; return; }
-    box.innerHTML=comments.map(c=>{ const mine=c.by===currentUser.uid, boss=c.role==='boss';
-      return `<div class="msg ${boss?'boss':''} ${mine?'mine':''}"><div class="who">${boss?'👑 ':''}${esc(c.byName||(boss?'관리자':'직원'))}${mine?' (나)':''}</div><div class="bubble">${esc(c.text)}</div></div>`; }).join('');
+    box.innerHTML=comments.map((c,i)=>{ const mine=c.by===currentUser.uid, boss=c.role==='boss'; const canDel=mine||userRole==='boss';
+      const acts=(mine||canDel)?`<div class="msg-acts">${mine?`<span onclick="editBlockMsg('${_threadSlotId}',${i})">수정</span>`:''}${canDel?`<span onclick="deleteBlockMsg('${_threadSlotId}',${i})">삭제</span>`:''}</div>`:'';
+      return `<div class="msg ${boss?'boss':''} ${mine?'mine':''}"><div class="who">${boss?'👑 ':''}${esc(c.byName||(boss?'관리자':'직원'))}${mine?' (나)':''}${c.edited?' <span class="msg-edited">(수정됨)</span>':''}</div><div class="bubble">${esc(c.text)}</div>${acts}</div>`; }).join('');
     box.scrollTop=box.scrollHeight;
   }
   window.sendBlockMsg = async (slotId)=>{
@@ -586,6 +603,23 @@
     cur.push({by:currentUser.uid, byName:(userProfile&&userProfile.displayName)||'', role:userRole||'staff', text, at:Timestamp.now()});
     await setDoc(ref,{comments:cur, lastMsgAt:Timestamp.now()},{merge:true});
     if(inp){ inp.value=''; inp.focus(); }
+  };
+  window.editBlockMsg = async (slotId,i)=>{
+    const ref=doc(db,"slots",slotId); const snap=await getDoc(ref); if(!snap.exists()) return; const cur=(snap.data().comments)||[];
+    const c=cur[i]; if(!c) return;
+    if(c.by!==currentUser.uid){ alert('본인이 남긴 메시지만 수정할 수 있어요.'); return; }
+    const nv=prompt('메시지 수정', c.text); if(nv==null) return; const t=nv.trim();
+    if(!t){ alert('내용이 비었어요. 지우려면 삭제를 눌러주세요.'); return; }
+    cur[i]={...c, text:t, edited:true, editedAt:Timestamp.now()};
+    try{ await setDoc(ref,{comments:cur},{merge:true}); }catch(e){ alert(fbErr(e)); }
+  };
+  window.deleteBlockMsg = async (slotId,i)=>{
+    const ref=doc(db,"slots",slotId); const snap=await getDoc(ref); if(!snap.exists()) return; const cur=(snap.data().comments)||[];
+    const c=cur[i]; if(!c) return;
+    if(c.by!==currentUser.uid && userRole!=='boss'){ alert('본인 메시지만 삭제할 수 있어요.'); return; }
+    if(!confirm('이 메시지를 삭제할까요?')) return;
+    cur.splice(i,1);
+    try{ await setDoc(ref,{comments:cur},{merge:true}); }catch(e){ alert(fbErr(e)); }
   };
   window.saveBlock = async (slotId)=>{
     const title=$('bd-title').value.trim(); if(!title){ alert('제목을 입력하세요'); return; }
@@ -1111,7 +1145,7 @@
       <div class="modal-title">필수 업무 관리</div>
       <div class="muted" style="margin-bottom:12px;line-height:1.6">💡 <b>여러 개</b>를 등록할 수 있어요. 하나 넣고 "＋추가" → 또 넣고 "＋추가"를 반복하면 아래 목록에 쌓입니다. 주제를 달면 오늘 화면에서 <b>주제별로 묶여</b> 보여요.</div>
       <div class="form-group"><label>제목 (하나의 필수 업무)</label><input id="rt-title" class="mini-input" style="width:100%" placeholder="예: 전일 이용회원 검수"></div>
-      <div class="form-group"><label>사업</label><select id="rt-biz" class="mini-input" style="width:100%">${bizOptions(wbBiz)}</select></div>
+      <div class="form-group"><label>프로젝트</label><select id="rt-biz" class="mini-input" style="width:100%">${bizOptions(wbBiz)}</select></div>
       <div class="form-group"><label>주제 (선택)</label><div class="row" style="gap:6px"><select id="rt-cat" class="mini-input" style="flex:1">${catOptions('')}</select><button type="button" class="btn btn-ghost" onclick="newCatInline('rt-cat')">＋ 새 주제</button></div></div>
       ${boss?`<div class="form-group"><label>대상</label><select id="rt-target" class="mini-input" style="width:100%">${targetOpts}</select></div>`:`<input type="hidden" id="rt-target" value="${currentUser.uid}">`}
       <div class="form-group"><label>작업 절차 (SOP) — 단계별 방법 (선택)</label><textarea id="rt-guide" class="ta" style="height:76px" placeholder="1. ...&#10;2. ..."></textarea></div>
@@ -1303,7 +1337,7 @@
     const t=new Date(); t.setDate(t.getDate()+1); const tStr=ymd(t);
     showModal(`<div class="modal-title">업무 배정 — ${name}</div>
       <div class="form-group"><label>날짜</label><input id="at-date" type="date" class="mini-input" style="width:100%" value="${tStr}"></div>
-      <div class="form-group"><label>사업</label><select id="at-biz" class="mini-input" style="width:100%">${bizOptions(wbBiz)}</select></div>
+      <div class="form-group"><label>프로젝트</label><select id="at-biz" class="mini-input" style="width:100%">${bizOptions(wbBiz)}</select></div>
       <div class="form-group"><label>주제 (선택)</label><div class="row" style="gap:6px"><select id="at-cat" class="mini-input" style="flex:1">${catOptions('')}</select><button type="button" class="btn btn-ghost" onclick="newCatInline('at-cat')">＋ 새 주제</button></div></div>
       <div class="form-group"><label>예정 시간 (선택)</label><input id="at-time" type="time" class="mini-input" style="width:100%"></div>
       <div class="form-group"><label>업무 내용</label><input id="at-title" class="mini-input" style="width:100%" placeholder="업무 내용"></div>
@@ -1495,9 +1529,11 @@ body{font-family:-apple-system,'Malgun Gothic','맑은 고딕',sans-serif;backgr
 .task-row{display:flex;align-items:flex-start;gap:10px;padding:11px 12px;background:var(--surface);border:1px solid var(--border);border-radius:10px;margin-bottom:8px;transition:box-shadow .12s;}
 .task-row:hover{box-shadow:0 2px 8px rgba(30,40,80,.06);}
 .task-row.static{cursor:default;}
-.task-row.carry-item{background:var(--warn-bg);border-color:#f0d9a8;animation:slideIn .45s ease both;}
-.task-row.task-done{opacity:.72;}
-.task-row.task-done .task-title{text-decoration:line-through;color:var(--text-3);}
+.task-row.carry-item{background:var(--warn-bg);border-color:#f0d9a8;box-shadow:inset 3px 0 0 #f59e0b;animation:slideIn .45s ease both;}
+/* 완료 = 성취(초록 강조, 줄긋기 없음) */
+.task-row.task-done{background:rgba(22,163,74,.07);box-shadow:inset 3px 0 0 #16a34a;}
+.task-row.task-done .task-title{text-decoration:none;color:#137a3a;font-weight:700;}
+.task-row.task-done .task-title::before{content:'✓ ';color:#16a34a;font-weight:800;}
 .star{font-size:17px;color:var(--text-3);cursor:pointer;flex-shrink:0;line-height:1.4;user-select:none;}
 .task-important .star{color:var(--important);animation:starPulse 1.9s ease-in-out infinite;}
 .task-main{flex:1;min-width:0;}
@@ -1507,8 +1543,8 @@ body{font-family:-apple-system,'Malgun Gothic','맑은 고딕',sans-serif;backgr
 .help-note{font-size:11.5px;color:var(--warn);margin-top:3px;}
 .boss-inline{font-size:12px;color:var(--accent-text);background:var(--accent-bg);border-radius:6px;padding:4px 8px;margin-top:5px;}
 .pill{font-size:10px;font-weight:600;padding:2px 7px;border-radius:20px;vertical-align:1px;}
-.pill-carry{background:#f6e3c0;color:#92600d;}
-.pill-help{background:var(--danger-bg);color:var(--danger);}
+.pill-carry{background:#f59e0b;color:#fff;font-weight:700;}
+.pill-help{background:var(--danger);color:#fff;font-weight:700;}
 .seg-group{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;flex-shrink:0;}
 .seg{border:none;background:var(--surface);color:var(--text-3);font-size:11.5px;font-weight:600;padding:5px 9px;cursor:pointer;border-left:1px solid var(--border);}
 .seg:first-child{border-left:none;}
@@ -1699,9 +1735,17 @@ body{font-family:-apple-system,'Malgun Gothic','맑은 고딕',sans-serif;backgr
 .evt .et{font-weight:700;color:var(--text);overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;word-break:break-word;}
 .evt .es{font-size:9.5px;color:var(--text-3);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums;}
 .evt .star{color:var(--important);}
-.evt.done{opacity:.64;}
-.evt.done .et{text-decoration:line-through;color:var(--text-2);}
+/* 완료 = 성취(초록 체크, 줄긋기 없음) */
+.evt.done .et{color:#137a3a;font-weight:700;}
+.evt.done{box-shadow:0 1px 2px rgba(22,163,74,.18),0 0 0 1px rgba(22,163,74,.25) inset;}
+/* 이월 = 경각심(호박색 테두리) · 막힘 = 빨강 */
+.evt.carry{box-shadow:0 0 0 1.6px #f59e0b inset;}
+.evt.help{box-shadow:0 0 0 1.6px #dc2626 inset;}
 .evt .badge{position:absolute;bottom:2px;right:4px;font-size:10.5px;line-height:1;}
+.evt .b-chat{top:2px;right:4px;bottom:auto;}
+.evt .b-done{bottom:3px;right:4px;width:16px;height:16px;border-radius:50%;background:#16a34a;color:#fff;text-align:center;line-height:16px;font-size:11px;font-weight:800;box-shadow:0 1px 3px rgba(22,163,74,.5);}
+.evt .b-help{bottom:3px;right:4px;width:16px;height:16px;border-radius:50%;background:#dc2626;color:#fff;text-align:center;line-height:16px;font-size:11px;font-weight:800;}
+.evt .b-carry{bottom:3px;right:4px;background:#f59e0b;color:#fff;border-radius:8px;padding:0 5px;height:14px;line-height:14px;font-size:9px;font-weight:800;}
 .drag-ghost{position:absolute;left:3px;right:3px;background:var(--accent-bg);border:1.5px dashed var(--accent);border-radius:7px;color:var(--accent-text);font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:6;}
 .nowline{position:absolute;height:2px;background:var(--danger);z-index:5;pointer-events:none;}
 .nowline::before{content:'';position:absolute;left:-4px;top:-3px;width:8px;height:8px;border-radius:50%;background:var(--danger);}
@@ -1716,6 +1760,11 @@ body{font-family:-apple-system,'Malgun Gothic','맑은 고딕',sans-serif;backgr
 .msg.mine{text-align:right;}
 .msg.boss .who{color:var(--warn);}
 .msg.boss .bubble{background:var(--warn-bg);border-color:#f0d9a8;}
+.msg-acts{margin-top:3px;display:flex;gap:10px;}
+.msg.mine .msg-acts{justify-content:flex-end;}
+.msg-acts span{font-size:11px;color:var(--text-3);cursor:pointer;}
+.msg-acts span:hover{color:var(--accent);text-decoration:underline;}
+.msg-edited{font-size:10px;color:var(--text-3);font-weight:400;}
 .reply{display:flex;gap:6px;margin-top:8px;}
 .reply input{flex:1;border:1px solid var(--border);border-radius:8px;background:var(--surface-2);padding:8px 10px;font-size:13px;outline:none;}
 /* 알림 */
