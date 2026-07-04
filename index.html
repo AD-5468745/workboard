@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- WorkBoard build 2026-07-05c (지시·커멘트 이력에서 수정·삭제 + 지시모달 현재값·지우기 + 색 진하게(.18/4px) + 팔레트 회색 제거) -->
+<!-- WorkBoard build 2026-07-05d (알림 클릭이동·삭제동기화·중복정리·3음 차임 + 관리자↔직원 일일 대화(daily.thread) 양방향) -->
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
@@ -384,7 +384,8 @@
     if(!msg){ bm.innerHTML=''; return; }
     const at=(d.bossCommentAt&&d.bossCommentAt.seconds)?new Date(d.bossCommentAt.seconds*1000):null;
     const atTxt=at?`${at.getMonth()+1}/${at.getDate()} ${String(at.getHours()).padStart(2,'0')}:${String(at.getMinutes()).padStart(2,'0')}`:'';
-    bm.innerHTML=`<div class="wb-msg"><span class="ic">📣</span><div style="flex:1"><div class="mt">관리자 메시지</div><div class="ms">${esc(d.bossComment)}</div></div><div class="rt">${atTxt}</div></div>`;
+    const bUid=wbUid||currentUser.uid;
+    bm.innerHTML=`<div class="wb-msg"><span class="ic">📣</span><div style="flex:1"><div class="mt">관리자 메시지</div><div class="ms">${esc(d.bossComment)}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px"><div class="rt">${atTxt}</div><button class="btn btn-primary" style="padding:5px 12px;font-size:12px" onclick="openDailyChat('${bUid}')">💬 대화</button></div></div>`;
   }
   function updateTabCounts(){
     const uid=wbUid||currentUser.uid;
@@ -399,37 +400,53 @@
     set('cnt-plan',plan);
   }
 
-  // ── 알림: 인앱 배지 + (선택)브라우저 알림 ── 실시간 스냅샷에서 '남이 남긴 새 소식'만 감지 ──
+  // ── 알림: 인앱 배지 + (선택)브라우저 알림 · 클릭 이동 · 삭제 동기화 · 중복 정리 ──
   let _notifSeen=null, _notifReadyAt=0, _notifList=[], _notifUnread=0, _notifOpen=false, _audioCtx=null, _toastT=null;
   function wbNotifReset(){ _notifSeen=new Set(); _notifReadyAt=Date.now()+1500; _notifList=[]; _notifUnread=0; _notifOpen=false; const p=$('notif-panel'); if(p)p.style.display='none'; renderNotifBell(); }
   function wbDetectNotify(){
     if(!_notifSeen) return;
-    const me=currentUser&&currentUser.uid, cur=[];
-    (wbCache.slots||[]).forEach(s=>{ (s.comments||[]).forEach(c=>{ if(c&&c.by&&c.by!==me){ const at=(c.at&&c.at.seconds)||0; cur.push({key:'c:'+s.id+':'+at, task:s.title||'업무', who:c.byName||(c.role==='boss'?'관리자':'직원'), text:c.text||'', at}); } }); });
-    const d=wbCache.daily||{}; if((d.bossComment||'').trim() && d.bossCommentBy && d.bossCommentBy!==me){ const at=(d.bossCommentAt&&d.bossCommentAt.seconds)||0; cur.push({key:'o:'+at, task:'관리자 지시', who:'관리자', text:d.bossComment||'', at}); }
-    const fresh=cur.filter(x=>!_notifSeen.has(x.key));
-    cur.forEach(x=>_notifSeen.add(x.key));
-    if(Date.now()<_notifReadyAt) return;         // 접속 직후 기준선(조용히 시드)
-    fresh.sort((a,b)=>a.at-b.at).forEach(pushNotif);
+    const me=currentUser&&currentUser.uid, uid=(wbUid||me), curMap=new Map();
+    // 업무 대화(블록 커멘트)
+    (wbCache.slots||[]).forEach(s=>{ (s.comments||[]).forEach(c=>{ if(c&&c.by&&c.by!==me){ const at=(c.at&&c.at.seconds)||0; const key='c:'+s.id+':'+at; curMap.set(key,{key, kind:'chat', task:s.title||'업무', who:c.byName||(c.role==='boss'?'관리자':'직원'), text:c.text||'', at, uid:s.uid||uid, slotId:s.id}); } }); });
+    const d=wbCache.daily||{};
+    // 관리자 지시(하루 1건 · 수정해도 한 줄로 유지)
+    if((d.bossComment||'').trim() && d.bossCommentBy && d.bossCommentBy!==me){ const at=(d.bossCommentAt&&d.bossCommentAt.seconds)||0; curMap.set('o:'+uid, {key:'o:'+uid, kind:'order', task:'관리자 지시', who:'관리자', text:d.bossComment||'', at, uid}); }
+    // 관리자↔직원 대화(daily.thread)
+    (d.thread||[]).forEach(m=>{ if(m&&m.by&&m.by!==me){ const at=(m.at&&m.at.seconds)||0; const key='t:'+uid+':'+at; curMap.set(key,{key, kind:'thread', task:'💬 대화', who:m.byName||(m.role==='boss'?'관리자':'직원'), text:m.text||'', at, uid}); } });
+    // 새 항목만 골라 알림
+    const fresh=[]; curMap.forEach((v,k)=>{ if(!_notifSeen.has(k)) fresh.push(v); });
+    _notifSeen = new Set(curMap.keys());   // 현재 존재하는 것만 기억 → 삭제됐다 다시 오면 재알림
+    // 리스트 동기화: 사라진(삭제된) 항목 제거 + 남은 항목 최신 내용으로 갱신
+    _notifList = _notifList.filter(it=>curMap.has(it.key)).map(it=>Object.assign({}, it, curMap.get(it.key)));
+    if(Date.now()>=_notifReadyAt){ fresh.sort((a,b)=>a.at-b.at).forEach(pushNotif); }
+    renderNotifBell(); if(_notifOpen){ const p=$('notif-panel'); if(p) p.innerHTML=notifPanelHTML(); }
   }
   function pushNotif(x){
-    _notifList.unshift(x); if(_notifList.length>20) _notifList.pop();
-    _notifUnread++; renderNotifBell(); notifBeep();
-    showToast(`💬 ${x.who}: ${(x.text||'').slice(0,42)}`);
+    _notifList = _notifList.filter(it=>it.key!==x.key); _notifList.unshift(x); if(_notifList.length>30) _notifList.pop();
+    _notifUnread++; notifBeep();
+    showToast(`🔔 ${x.who}: ${(x.text||'').slice(0,42)}`);
     if(typeof Notification!=='undefined' && Notification.permission==='granted' && localStorage.getItem('wbNotifBrowser')==='1'){
       try{ new Notification(`WorkBoard · ${x.task}`, {body:(`${x.who}: ${x.text||''}`).slice(0,120)}); }catch(e){}
     }
-    if(_notifOpen){ const p=$('notif-panel'); if(p) p.innerHTML=notifPanelHTML(); }
   }
   function renderNotifBell(){ const c=$('notif-count'); if(c){ c.textContent=_notifUnread>99?'99+':(_notifUnread||''); c.style.display=_notifUnread?'flex':'none'; } }
   window.toggleNotifPanel=()=>{ const p=$('notif-panel'); if(!p) return; _notifOpen=!_notifOpen; if(_notifOpen){ _notifUnread=0; renderNotifBell(); p.innerHTML=notifPanelHTML(); p.style.display='block'; } else p.style.display='none'; };
+  window.openNotif=(key)=>{
+    const it=_notifList.find(x=>x.key===key); _notifOpen=false; const p=$('notif-panel'); if(p)p.style.display='none';
+    if(!it) return; const uid=it.uid||wbUid||currentUser.uid;
+    if(it.kind==='chat'){ openBlockDetail(uid, it.slotId); }
+    else { openDailyChat(uid); }   // 지시·대화 → 관리자↔직원 대화창(그 자리에서 답장)
+  };
+  window.clearNotifs=()=>{ _notifList=[]; _notifUnread=0; renderNotifBell(); if(_notifOpen){ const p=$('notif-panel'); if(p) p.innerHTML=notifPanelHTML(); } };
+  window.notifPreview=()=>{ const prev=localStorage.getItem('wbNotifSound'); localStorage.setItem('wbNotifSound','1'); notifBeep(); if(prev==='0') localStorage.setItem('wbNotifSound','0'); };
   function notifPanelHTML(){
     const on=(typeof Notification!=='undefined') && Notification.permission==='granted' && localStorage.getItem('wbNotifBrowser')==='1';
     const soundOn=localStorage.getItem('wbNotifSound')!=='0';
-    const items=_notifList.length?_notifList.map(x=>{ const t=x.at?new Date(x.at*1000):null; const tt=t?`${t.getMonth()+1}/${t.getDate()} ${String(t.getHours()).padStart(2,'0')}:${String(t.getMinutes()).padStart(2,'0')}`:''; return `<div class="nt-row"><div class="nt-task">${esc(x.task)}</div><div class="nt-text">${esc(x.who)}: ${esc(x.text||'')}</div><div class="nt-meta">${tt}</div></div>`; }).join(''):'<div class="muted" style="padding:16px;text-align:center">새 알림이 없습니다.</div>';
-    return `<div class="nt-head"><b>알림</b><span class="nt-opts"><label class="nt-toggle"><input type="checkbox" ${soundOn?'checked':''} onchange="toggleNotifSound(this.checked)"> 소리</label><label class="nt-toggle"><input type="checkbox" ${on?'checked':''} onchange="toggleBrowserNotif(this.checked)"> 컴퓨터 알림</label></span></div><div class="nt-list">${items}</div>`;
+    const ic={chat:'💬',order:'📣',thread:'💬'};
+    const items=_notifList.length?_notifList.map(x=>{ const t=x.at?new Date(x.at*1000):null; const tt=t?`${t.getMonth()+1}/${t.getDate()} ${String(t.getHours()).padStart(2,'0')}:${String(t.getMinutes()).padStart(2,'0')}`:''; return `<div class="nt-row" onclick="openNotif('${x.key}')"><div class="nt-task">${ic[x.kind]||'🔔'} ${esc(x.task)} <span class="nt-go">열기 ›</span></div><div class="nt-text">${esc(x.who)}: ${esc(x.text||'')}</div><div class="nt-meta">${tt}</div></div>`; }).join(''):'<div class="muted" style="padding:16px;text-align:center">새 알림이 없습니다.</div>';
+    return `<div class="nt-head"><b>알림</b><span class="nt-opts"><label class="nt-toggle"><input type="checkbox" ${soundOn?'checked':''} onchange="toggleNotifSound(this.checked)"> 소리</label><span class="nt-mini" onclick="notifPreview()">미리듣기</span><label class="nt-toggle"><input type="checkbox" ${on?'checked':''} onchange="toggleBrowserNotif(this.checked)"> 컴퓨터 알림</label></span></div><div class="nt-list">${items}</div>${_notifList.length?'<div class="nt-foot"><span class="nt-mini" onclick="clearNotifs()">모두 지우기</span></div>':''}`;
   }
-  window.toggleNotifSound=(v)=>{ localStorage.setItem('wbNotifSound', v?'1':'0'); };
+  window.toggleNotifSound=(v)=>{ localStorage.setItem('wbNotifSound', v?'1':'0'); if(v) notifPreview(); };
   window.toggleBrowserNotif=async(want)=>{
     if(!want){ localStorage.setItem('wbNotifBrowser','0'); if(_notifOpen){const p=$('notif-panel'); if(p)p.innerHTML=notifPanelHTML();} return; }
     if(typeof Notification==='undefined'){ alert('이 브라우저는 알림을 지원하지 않아요.'); return; }
@@ -437,9 +454,48 @@
     if(perm==='granted'){ localStorage.setItem('wbNotifBrowser','1'); } else { localStorage.setItem('wbNotifBrowser','0'); alert('브라우저에서 알림이 막혀 있어요. 주소창 왼쪽 자물쇠 → 알림 허용으로 바꿔 주세요.'); }
     if(_notifOpen){ const p=$('notif-panel'); if(p) p.innerHTML=notifPanelHTML(); }
   };
-  function notifBeep(){ if(localStorage.getItem('wbNotifSound')==='0') return; try{ _audioCtx=_audioCtx||new (window.AudioContext||window.webkitAudioContext)(); const o=_audioCtx.createOscillator(), g=_audioCtx.createGain(); o.frequency.value=880; o.type='sine'; o.connect(g); g.connect(_audioCtx.destination); const t=_audioCtx.currentTime; g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.14,t+0.02); g.gain.exponentialRampToValueAtTime(0.0001,t+0.28); o.start(t); o.stop(t+0.3); }catch(e){} }
-  function showToast(msg){ let t=$('wb-toast'); if(!t){ t=el('div'); t.id='wb-toast'; t.className='wb-toast'; document.body.appendChild(t); } t.textContent=msg; t.classList.add('show'); clearTimeout(_toastT); _toastT=setTimeout(()=>t.classList.remove('show'),4200); }
+  function notifBeep(){ if(localStorage.getItem('wbNotifSound')==='0') return; try{
+    _audioCtx=_audioCtx||new (window.AudioContext||window.webkitAudioContext)(); if(_audioCtx.state==='suspended'){ try{_audioCtx.resume();}catch(e){} }
+    const t0=_audioCtx.currentTime; const notes=[[784,0],[988,0.16],[1319,0.32]];  // G5·B5·E6 3음 차임(길고 또렷)
+    notes.forEach(([f,dt])=>{ const o=_audioCtx.createOscillator(), g=_audioCtx.createGain(); o.type='triangle'; o.frequency.value=f; o.connect(g); g.connect(_audioCtx.destination); const t=t0+dt; g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.34,t+0.03); g.gain.exponentialRampToValueAtTime(0.0001,t+0.5); o.start(t); o.stop(t+0.52); });
+  }catch(e){} }
+  function showToast(msg){ let t=$('wb-toast'); if(!t){ t=el('div'); t.id='wb-toast'; t.className='wb-toast'; document.body.appendChild(t); } t.textContent=msg; t.classList.add('show'); clearTimeout(_toastT); _toastT=setTimeout(()=>t.classList.remove('show'),4600); }
   document.addEventListener('click',(e)=>{ if(_notifOpen){ const w=e.target.closest&&e.target.closest('.notif-wrap'); if(!w){ _notifOpen=false; const p=$('notif-panel'); if(p)p.style.display='none'; } } });
+
+  // ── 관리자 ↔ 직원 대화(하루 단위 스레드) : 지시에 바로 답장 ──
+  let _dcUnsub=null;
+  window.openDailyChat=async(uid)=>{
+    const ds=today(), ref=doc(db,"daily",`${uid}_${ds}`);
+    let d={}; try{ const snap=await getDoc(ref); if(snap.exists()) d=snap.data(); }catch(e){}
+    const order=(d.bossComment||'').trim();
+    showModal(`<div class="modal-title">💬 관리자 ↔ 직원 대화 <span class="muted" style="font-weight:400">(실시간)</span></div>
+      ${order?`<div class="wb-msg" style="margin-bottom:10px"><span class="ic">📣</span><div style="flex:1"><div class="mt">관리자 지시</div><div class="ms">${esc(order)}</div></div></div>`:'<div class="muted" style="margin-bottom:10px">오늘 대화입니다. 자유롭게 메시지를 주고받으세요.</div>'}
+      <div class="thread" id="dc-thread"><div class="empty2">불러오는 중…</div></div>
+      <div class="reply"><input id="dc-reply" placeholder="메시지 입력 · Enter" onkeydown="if(event.key==='Enter')sendDailyMsg('${uid}')"><button class="btn btn-primary" onclick="sendDailyMsg('${uid}')">전송</button></div>
+      <div class="modal-footer"><button class="btn btn-ghost" onclick="closeDailyChat()">닫기</button></div>`);
+    if(_dcUnsub){try{_dcUnsub();}catch(e){}}
+    _dcUnsub=onSnapshot(ref, s=>{ renderThread('dc-thread', (s.exists()&&s.data().thread)||[], {type:'daily', uid, ds}); }, e=>{});
+    setTimeout(()=>{ const r=$('dc-reply'); if(r)r.focus(); },60);
+  };
+  window.sendDailyMsg=async(uid)=>{
+    const inp=$('dc-reply'); const text=(inp?.value||'').trim(); if(!text) return;
+    const ref=doc(db,"daily",`${uid}_${today()}`); let cur=[]; try{ const s=await getDoc(ref); cur=(s.exists()&&s.data().thread)||[]; }catch(e){}
+    cur.push({by:currentUser.uid, byName:(userProfile&&userProfile.displayName)||'', role:userRole||'staff', text, at:Timestamp.now()});
+    try{ await setDoc(ref,{thread:cur, lastMsgAt:Timestamp.now()},{merge:true}); }catch(e){ alert(fbErr(e)+'\n(대화가 저장되지 않으면 Firestore 규칙에 daily의 thread 필드 쓰기 허용이 필요할 수 있어요.)'); return; }
+    if(inp){ inp.value=''; inp.focus(); }
+  };
+  window.closeDailyChat=()=>{ if(_dcUnsub){try{_dcUnsub();}catch(e){} _dcUnsub=null;} closeModal(); };
+  window.editDailyMsg=async(uid,ds,i)=>{
+    const ref=doc(db,"daily",`${uid}_${ds}`); const snap=await getDoc(ref); if(!snap.exists()) return; const cur=(snap.data().thread)||[];
+    const c=cur[i]; if(!c) return; if(c.by!==currentUser.uid){ alert('본인이 남긴 메시지만 수정할 수 있어요.'); return; }
+    const nv=prompt('메시지 수정', c.text); if(nv==null) return; const t=nv.trim(); if(!t){ alert('내용이 비었어요. 지우려면 삭제를 눌러주세요.'); return; }
+    cur[i]={...c, text:t, edited:true, editedAt:Timestamp.now()}; try{ await setDoc(ref,{thread:cur},{merge:true}); }catch(e){ alert(fbErr(e)); }
+  };
+  window.deleteDailyMsg=async(uid,ds,i)=>{
+    const ref=doc(db,"daily",`${uid}_${ds}`); const snap=await getDoc(ref); if(!snap.exists()) return; const cur=(snap.data().thread)||[];
+    const c=cur[i]; if(!c) return; if(c.by!==currentUser.uid && userRole!=='boss'){ alert('본인 메시지만 삭제할 수 있어요.'); return; }
+    if(!confirm('이 메시지를 삭제할까요?')) return; cur.splice(i,1); try{ await setDoc(ref,{thread:cur},{merge:true}); }catch(e){ alert(fbErr(e)); }
+  };
 
   // ══════════════════════════════════════
   //  탭1: 주간 캘린더 (30분 · 근무시간 · 드래그 · 실시간)
@@ -589,11 +645,14 @@
     _threadSlotId=slotId;
     _threadUnsub=onSnapshot(ref, s=>{ renderThread('bd-thread', (s.exists()&&s.data().comments)||[]); }, e=>{});
   };
-  function renderThread(boxId, comments){
+  function renderThread(boxId, comments, ctx){
     const box=$(boxId); if(!box) return;
+    ctx = ctx || {type:'slot', id:_threadSlotId};
+    const editCall=(i)=> ctx.type==='daily' ? `editDailyMsg('${ctx.uid}','${ctx.ds}',${i})` : `editBlockMsg('${ctx.id||_threadSlotId}',${i})`;
+    const delCall=(i)=> ctx.type==='daily' ? `deleteDailyMsg('${ctx.uid}','${ctx.ds}',${i})` : `deleteBlockMsg('${ctx.id||_threadSlotId}',${i})`;
     if(!comments.length){ box.innerHTML='<div class="empty2">아직 대화가 없어요. 첫 메시지를 남겨보세요.</div>'; return; }
     box.innerHTML=comments.map((c,i)=>{ const mine=c.by===currentUser.uid, boss=c.role==='boss'; const canDel=mine||userRole==='boss';
-      const acts=(mine||canDel)?`<div class="msg-acts">${mine?`<span onclick="editBlockMsg('${_threadSlotId}',${i})">수정</span>`:''}${canDel?`<span onclick="deleteBlockMsg('${_threadSlotId}',${i})">삭제</span>`:''}</div>`:'';
+      const acts=(mine||canDel)?`<div class="msg-acts">${mine?`<span onclick="${editCall(i)}">수정</span>`:''}${canDel?`<span onclick="${delCall(i)}">삭제</span>`:''}</div>`:'';
       return `<div class="msg ${boss?'boss':''} ${mine?'mine':''}"><div class="who">${boss?'👑 ':''}${esc(c.byName||(boss?'관리자':'직원'))}${mine?' (나)':''}${c.edited?' <span class="msg-edited">(수정됨)</span>':''}</div><div class="bubble">${esc(c.text)}</div>${acts}</div>`; }).join('');
     box.scrollTop=box.scrollHeight;
   }
@@ -1803,8 +1862,13 @@ body{font-family:-apple-system,'Malgun Gothic','맑은 고딕',sans-serif;backgr
 .nt-opts{display:flex;gap:10px;}
 .nt-toggle{font-size:11px;color:var(--text-2);display:inline-flex;align-items:center;gap:4px;cursor:pointer;}
 .nt-list{padding:4px 0;}
-.nt-row{padding:9px 13px;border-bottom:1px solid var(--border);}
+.nt-row{padding:9px 13px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s;}
 .nt-row:last-child{border-bottom:none;}
+.nt-row:hover{background:var(--accent-bg);}
+.nt-go{font-size:10.5px;color:var(--accent-text);font-weight:600;float:right;}
+.nt-mini{font-size:11px;color:var(--accent-text);cursor:pointer;font-weight:600;}
+.nt-mini:hover{text-decoration:underline;}
+.nt-foot{padding:9px 13px;border-top:1px solid var(--border);text-align:center;position:sticky;bottom:0;background:var(--surface);}
 .nt-task{font-size:11.5px;font-weight:700;color:var(--accent-text);}
 .nt-text{font-size:12.5px;color:var(--text);line-height:1.45;margin-top:2px;word-break:break-word;}
 .nt-meta{font-size:10.5px;color:var(--text-3);margin-top:3px;}
