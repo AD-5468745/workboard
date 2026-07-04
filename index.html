@@ -83,8 +83,9 @@
   const CAT_COLORS=['#4f6bed','#8b5cf6','#0ea5a4','#d97706','#e0567f','#16a34a','#0284c7','#64748b'];
 
   // ── 유틸 ──
-  const today = () => new Date().toISOString().slice(0,10);
-  const weekStart = (d=new Date()) => { const day=d.getDay()||7; const mon=new Date(d); mon.setDate(d.getDate()-(day-1)); return mon.toISOString().slice(0,10); };
+  const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;  // 로컬 날짜(타임존 안전)
+  const today = () => ymd(new Date());
+  const weekStart = (d=new Date()) => { const day=d.getDay()||7; const mon=new Date(d); mon.setDate(d.getDate()-(day-1)); return ymd(mon); };
   const $ = id => document.getElementById(id);
   const el = (tag,cls,html='') => { const e=document.createElement(tag); if(cls)e.className=cls; if(html)e.innerHTML=html; return e; };
   const esc = s => (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -404,7 +405,7 @@
     else { const snap=await getDocs(query(collection(db,"slots"),where("uid","==",uid),where("weekStart","==",ws))); slots=[]; snap.forEach(d=>slots.push({id:d.id,...d.data()})); }
     slots=slots.filter(bizMatch);   // 선택된 사업만(통합이면 전체)
     const wsDate=new Date(ws+"T00:00:00"); const dayList=[];
-    for(let i=0;i<7;i++){ const dd=new Date(wsDate); dd.setDate(dd.getDate()+i); dayList.push(dd.toISOString().slice(0,10)); }
+    for(let i=0;i<7;i++){ const dd=new Date(wsDate); dd.setDate(dd.getDate()+i); dayList.push(ymd(dd)); }
     const tds=today();
     const rows=Math.max(1,Math.round((eMin-sMin)/CAL_STEP));
     const legend=categories.length?('<div class="legend">'+categories.map(c=>`<span class="item"><span class="sw" style="background:${c.color||'#cbd2dc'}"></span>${esc(c.name)}</span>`).join('')+`<span class="hint">근무 ${minHM(sMin)}–${minHM(eMin)} · 30분 · 빈칸 드래그로 추가</span></div>`):`<div class="legend"><span class="hint">근무 ${minHM(sMin)}–${minHM(eMin)} · 30분 · 빈칸 드래그로 추가 · 주제는 '오늘 진행중'에서 관리</span></div>`;
@@ -445,7 +446,7 @@
     if(dayList.includes(tds)){ const nowM=toMin(nowHM()); if(nowM!=null && nowM>=sMin && nowM<=eMin){ const idx=dayList.indexOf(tds); const line=el('div','nowline'); line.style.cssText=`top:${(nowM-sMin)/CAL_STEP*CAL_ROWH}px;left:calc(56px + (100% - 56px) * ${idx} / 7);width:calc((100% - 56px) / 7);`; body.appendChild(line); } }
     body.scrollTop=Math.max(0,(((toMin(nowHM())||sMin)-sMin)/CAL_STEP*CAL_ROWH)-120);
   }
-  window.wbWeek = (dir)=>{ if(dir===0) wbWeekStart=weekStart(); else { const d=new Date(wbWeekStart+"T00:00:00"); d.setDate(d.getDate()+dir*7); wbWeekStart=d.toISOString().slice(0,10); } if(wbTab==='cal') renderCalendar(wbUid||currentUser.uid); };
+  window.wbWeek = (dir)=>{ if(dir===0) wbWeekStart=weekStart(); else { const d=new Date(wbWeekStart+"T00:00:00"); d.setDate(d.getDate()+dir*7); wbWeekStart=ymd(d); } if(wbTab==='cal') renderCalendar(wbUid||currentUser.uid); };
 
   function attachDrag(col, ds, sMin, uid){
     const isOwner=currentUser.uid===uid, isBoss=userRole==='boss'; if(!isOwner&&!isBoss) return;
@@ -553,7 +554,7 @@
   //  탭4: 내일 계획 (오늘 미완 자동 이월 예정 + 직접 추가)
   // ══════════════════════════════════════
   async function renderPlanTab(uid){
-    const p=$('wb-panel'); const t=new Date(); t.setDate(t.getDate()+1); const tmr=dateLabel(t.toISOString().slice(0,10));
+    const p=$('wb-panel'); const t=new Date(); t.setDate(t.getDate()+1); const tmr=dateLabel(ymd(t));
     const inc=(wbCache.slots||[]).filter(s=>s.date===today() && (s.status||'todo')!=='done' && s.title && bizMatch(s));
     p.innerHTML=`
       <div class="link-conn">🔗 오늘 <b>못 끝낸 업무</b>는 내일이 되면 자동으로 <b>'오늘 진행중'</b>으로 넘어갑니다.</div>
@@ -579,7 +580,7 @@
     const p=$('wb-panel'); const prof=wbProfile||{};
     const ws=prof.workStart||DEFAULT_START, we=prof.workEnd||DEFAULT_END;
     const wsMon=weekStart(); const wsDate=new Date(wsMon+'T00:00:00'); const days=[];
-    for(let i=0;i<7;i++){ const d=new Date(wsDate); d.setDate(d.getDate()+i); days.push(d.toISOString().slice(0,10)); }
+    for(let i=0;i<7;i++){ const d=new Date(wsDate); d.setDate(d.getDate()+i); days.push(ymd(d)); }
     let byDate={};
     try{ const snap=await getDocs(query(collection(db,"daily"),where("uid","==",uid))); snap.forEach(x=>{ const v=x.data(); if(v.date) byDate[v.date]=v; }); }catch(e){ console.error('[WB] attend load',e); }
     const t0=today();
@@ -1035,10 +1036,10 @@
     const HRS=(hoursArr&&hoursArr.length)?hoursArr:HOURS; const ws=weekStart(); const wrap=$(containerId);
     wrap.innerHTML='<div class="sec-title" style="margin-bottom:10px">이번 주 타임테이블 <span class="muted">· 칸을 눌러 시간별 업무를 넣어요</span></div>';
     const grid=el('div','week-grid'); const hdr=el('div','week-header-row');
-    hdr.innerHTML='<div class="time-col-hdr"></div>'+DAYS.map((d,i)=>{const date=new Date(ws);date.setDate(date.getDate()+i);const ds=date.toISOString().slice(0,10);const isT=ds===today();return `<div class="day-hdr${isT?' today':''}">${d}<br><span class="day-date">${date.getMonth()+1}/${date.getDate()}</span></div>`;}).join('');
+    hdr.innerHTML='<div class="time-col-hdr"></div>'+DAYS.map((d,i)=>{const date=new Date(ws);date.setDate(date.getDate()+i);const ds=ymd(date);const isT=ds===today();return `<div class="day-hdr${isT?' today':''}">${d}<br><span class="day-date">${date.getMonth()+1}/${date.getDate()}</span></div>`;}).join('');
     grid.appendChild(hdr);
     for(const hour of HRS){ const row=el('div','week-row'); row.innerHTML=`<div class="time-col">${hour}</div>`;
-      for(let i=0;i<7;i++){ const date=new Date(ws);date.setDate(date.getDate()+i);const ds=date.toISOString().slice(0,10);const isT=ds===today();const cell=el('div','week-cell'+(isT?' today-col':'')); cell.dataset.date=ds; cell.dataset.hour=hour; cell.dataset.uid=uid; cell.addEventListener('click',()=>openSlotModal(uid,ds,hour,cell)); row.appendChild(cell); }
+      for(let i=0;i<7;i++){ const date=new Date(ws);date.setDate(date.getDate()+i);const ds=ymd(date);const isT=ds===today();const cell=el('div','week-cell'+(isT?' today-col':'')); cell.dataset.date=ds; cell.dataset.hour=hour; cell.dataset.uid=uid; cell.addEventListener('click',()=>openSlotModal(uid,ds,hour,cell)); row.appendChild(cell); }
       grid.appendChild(row); }
     wrap.appendChild(grid);
     const q=query(collection(db,"slots"),where("uid","==",uid),where("weekStart","==",ws));
@@ -1200,7 +1201,7 @@
   window.saveBossComment = async (uid, dateStr) => { const c=$('boss-comment-input')?.value.trim()||''; await setDoc(doc(db,"daily",`${uid}_${dateStr}`),{bossComment:c,bossCommentAt:Timestamp.now()},{merge:true}); alert('코멘트가 저장되었습니다.'); };
   window.openAddTaskModal = async (uid,name) => {
     await loadCategories(); await loadBusinesses();
-    const t=new Date(); t.setDate(t.getDate()+1); const tStr=t.toISOString().slice(0,10);
+    const t=new Date(); t.setDate(t.getDate()+1); const tStr=ymd(t);
     showModal(`<div class="modal-title">업무 배정 — ${name}</div>
       <div class="form-group"><label>날짜</label><input id="at-date" type="date" class="mini-input" style="width:100%" value="${tStr}"></div>
       <div class="form-group"><label>사업</label><select id="at-biz" class="mini-input" style="width:100%">${bizOptions(wbBiz)}</select></div>
