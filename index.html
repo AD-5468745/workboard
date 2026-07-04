@@ -147,7 +147,7 @@
           <button class="wb-tabbtn" id="wt-fixed" onclick="wbSwitch('fixed')">📌 일일 고정업무 <span class="cnt" id="cnt-fixed"></span></button>
           <button class="wb-tabbtn" id="wt-today" onclick="wbSwitch('today')">▶ 오늘 진행중 <span class="cnt" id="cnt-today"></span></button>
           <button class="wb-tabbtn" id="wt-plan" onclick="wbSwitch('plan')">🌙 내일 계획 <span class="cnt" id="cnt-plan"></span></button>
-          <button class="wb-tabbtn" id="wt-attend" onclick="wbSwitch('attend')">🕘 근태</button>
+          <button class="wb-tabbtn" id="wt-attend" onclick="wbSwitch('attend')">🕘 출퇴근기록</button>
         </div>
       </div>
       <div id="boss-msg-box"></div>
@@ -251,7 +251,7 @@
     const rows=Math.max(1,Math.round((eMin-sMin)/CAL_STEP));
     const legend=categories.length?('<div class="legend">'+categories.map(c=>`<span class="item"><span class="sw" style="background:${c.color||'#cbd2dc'}"></span>${esc(c.name)}</span>`).join('')+`<span class="hint">근무 ${minHM(sMin)}–${minHM(eMin)} · 30분 · 빈칸 드래그로 추가</span></div>`):`<div class="legend"><span class="hint">근무 ${minHM(sMin)}–${minHM(eMin)} · 30분 · 빈칸 드래그로 추가 · 주제는 '오늘 진행중'에서 관리</span></div>`;
     let timeCol='<div class="cal-tcol" style="height:'+(rows*CAL_ROWH)+'px">';
-    for(let m=sMin;m<eMin;m+=CAL_STEP){ timeCol+=`<div class="tl" style="height:${CAL_ROWH}px">${m%60===0?minHM(m):''}</div>`; }
+    for(let m=sMin;m<=eMin;m+=60){ const y=(m-sMin)/CAL_STEP*CAL_ROWH; const tf=(m===sMin)?'translateY(1px)':(m>=eMin?'translateY(-100%)':'translateY(-50%)'); timeCol+=`<div class="tl" style="top:${y}px;transform:${tf}">${minHM(m)}</div>`; }
     timeCol+='</div>';
     let cols='';
     for(let i=0;i<7;i++){ const isT=dayList[i]===tds; cols+=`<div class="day-col${isT?' today':''}" data-date="${dayList[i]}" data-idx="${i}" style="height:${rows*CAL_ROWH}px"></div>`; }
@@ -329,7 +329,7 @@
       <div class="form-group"><label>상태</label><div class="seg-group modal-seg">${['done','wip','todo'].map(k=>`<button class="seg" data-s="${k}">${k==='todo'?'못함':STATUS_LABEL[k]}</button>`).join('')}</div></div>
       <div class="form-group"><label>제목</label><input id="bd-title" class="mini-input" style="width:100%" value="${esc(d.title)}"></div>
       <div class="row" style="gap:6px"><div class="form-group" style="flex:1"><label>시작</label><input id="bd-start" type="time" step="1800" class="mini-input" style="width:100%" value="${d.startTime||d.plannedTime||''}"></div><div class="form-group" style="flex:1"><label>종료</label><input id="bd-end" type="time" step="1800" class="mini-input" style="width:100%" value="${d.endTime||''}"></div></div>
-      <div class="form-group"><label>💬 관리자 ↔ 직원 대화 <span class="muted">(실시간)</span></label><div class="thread" id="bd-thread"><div class="empty2">불러오는 중…</div></div>
+      <div class="form-group"><label>💬 대화 <span class="muted">(실시간)</span></label><div class="thread" id="bd-thread"><div class="empty2">불러오는 중…</div></div>
         <div class="reply"><input id="bd-reply" placeholder="메시지 입력 · Enter" onkeydown="if(event.key==='Enter')sendBlockMsg('${slotId}')"><button class="btn btn-primary" onclick="sendBlockMsg('${slotId}')">전송</button></div></div>
       <div class="modal-footer"><button class="btn btn-danger" onclick="deleteBlock('${slotId}')">삭제</button><button class="btn btn-ghost" onclick="closeBlockDetail()">닫기</button><button class="btn btn-primary" onclick="saveBlock('${slotId}')">저장</button></div>`);
     let sel=st; window.__bdStatus=sel;
@@ -366,7 +366,7 @@
   async function renderTodayTab(uid){
     const p=$('wb-panel'); const ws=(wbProfile&&wbProfile.workStart)||DEFAULT_START, we=(wbProfile&&wbProfile.workEnd)||DEFAULT_END;
     p.innerHTML=`
-      <div class="link-conn">🔗 캘린더의 오늘 업무가 여기 <b>주제별</b>로 모입니다. 상태를 바꾸면 캘린더 음영도 같이 바뀝니다. (출퇴근은 <b>🕘 근태</b> 탭)</div>
+      <div class="link-conn">🔗 캘린더의 오늘 업무가 여기 <b>주제별</b>로 모입니다. 상태를 바꾸면 캘린더 음영도 같이 바뀝니다. (출퇴근은 <b>🕘 출퇴근기록</b> 탭)</div>
       <div class="sec-head"><span class="sec-title">오늘 할 일 <span class="muted" style="font-weight:400">· 주제별</span></span><span><span class="link-btn" onclick="openCategoryManager('${uid}')" style="margin-right:12px">주제 관리</span><span id="save-status" class="muted"></span></span></div>
       <div id="task-list"></div>
       <div class="add-row"><i class="add-plus">＋</i><input id="new-task" class="add-input" placeholder="한 줄씩 추가 · Enter" onkeydown="if(event.key==='Enter')addTask('${uid}')"><button class="btn btn-primary" onclick="addTask('${uid}')">추가</button></div>
@@ -379,7 +379,7 @@
       <div class="soft-card" style="margin-top:16px">
         <label class="fld">자체 피드백</label><textarea id="self-feedback" class="ta" placeholder="오늘 이슈·반성·특이사항" oninput="scheduleDailySave()"></textarea>
         <label class="fld" style="margin-top:12px">배운 점 / 개선점 (회고)</label><textarea id="improve-input" class="ta" placeholder="오늘 배운 점, 다음에 개선할 점" oninput="scheduleDailySave()"></textarea>
-        <label class="fld danger" style="margin-top:12px">막힌 것 (관리자에게 표시)</label><textarea id="blocker-input" class="ta" placeholder="지금 막힌 것 (없으면 비워두기)" oninput="scheduleDailySave()"></textarea>
+        <label class="fld danger" style="margin-top:12px">막힌 것 · 도움이 필요한 것</label><textarea id="blocker-input" class="ta" placeholder="지금 막힌 것 (없으면 비워두기)" oninput="scheduleDailySave()"></textarea>
       </div>
       <div id="miss-check" style="margin-top:14px"></div>`;
     try { await loadDailyReport(uid, today()); } catch(e){ console.error('[WB] loadDailyReport', e); }
@@ -430,7 +430,7 @@
       return `<tr class="${ds===t0?'att-today':''}"><td>${DAYS[i]} <span class="muted">${dd.getMonth()+1}/${dd.getDate()}</span></td><td>${inTxt}</td><td>${outTxt}</td><td>${durTxt}</td></tr>`;
     }).join('');
     p.innerHTML=`
-      <div class="link-conn">🕘 여기서 출퇴근을 찍고, 이번 주 근태를 한눈에 봅니다. (관리자에게 실시간 공유)</div>
+      <div class="link-conn">🕘 여기서 출퇴근을 찍고, 이번 주 기록을 한눈에 봅니다.</div>
       <div class="row-between soft-card" style="padding:14px 16px;margin-bottom:14px;flex-wrap:wrap;gap:10px">
         <div class="clock-line" id="clock-status" style="font-size:15px;font-weight:600">아직 출근 전</div>
         <div class="row" style="gap:6px;flex-wrap:wrap">
@@ -442,7 +442,7 @@
         </div>
       </div>
       <div class="soft-card">
-        <div class="sec-title" style="margin-bottom:10px">이번 주 근태 <span class="muted">· ${dateLabel(days[0])} ~ ${dateLabel(days[6])}</span></div>
+        <div class="sec-title" style="margin-bottom:10px">이번 주 출퇴근기록 <span class="muted">· ${dateLabel(days[0])} ~ ${dateLabel(days[6])}</span></div>
         <table class="att-table"><thead><tr><th>요일</th><th>출근</th><th>퇴근</th><th>근무시간</th></tr></thead><tbody>${rows}</tbody></table>
       </div>`;
     renderClockStatus(byDate[t0]||{});
@@ -653,7 +653,7 @@
       <div class="form-group"><label>예정 시간 (선택)</label><input id="d-time" type="time" class="mini-input" value="${t.plannedTime||t.hour||''}"></div>
       <div class="form-group"><label>메모 (선택)</label><textarea id="d-memo" class="ta">${esc(t.memo)}</textarea></div>
       <div class="form-group"><label>🔗 관련 링크</label><div id="s-links"></div><button type="button" class="btn btn-ghost" style="margin-top:6px" onclick="addLinkRow()">＋ 링크</button></div>
-      <div class="form-group help-box"><label class="row" style="gap:6px;cursor:pointer"><input type="checkbox" id="d-help" ${t.needsHelp&&!t.helpResolved?'checked':''}> 🆘 이 업무 관리자에게 도움요청</label><input id="d-helpnote" class="mini-input" style="width:100%;margin-top:6px" placeholder="어디가 어려운지 한 줄 (선택)" value="${esc(t.helpNote)}"></div>
+      <div class="form-group help-box"><label class="row" style="gap:6px;cursor:pointer"><input type="checkbox" id="d-help" ${t.needsHelp&&!t.helpResolved?'checked':''}> 🆘 이 업무 도움요청</label><input id="d-helpnote" class="mini-input" style="width:100%;margin-top:6px" placeholder="어디가 어려운지 한 줄 (선택)" value="${esc(t.helpNote)}"></div>
       <div class="modal-footer"><button class="btn btn-danger" onclick="deleteTask('${uid}','${id}')">삭제</button><button class="btn btn-ghost" onclick="closeModal()">취소</button><button class="btn btn-primary" onclick="saveTaskDetail('${uid}','${id}')">저장</button></div>
     `);
     (t.subtasks||[]).forEach(s=>modalSubRow(s.text,s.done));
@@ -897,7 +897,7 @@
         <div class="form-group"><label>상태</label><div class="seg-group modal-seg">${['done','wip','todo'].map(k=>`<button class="seg" data-s="${k}">${k==='todo'?'미완':STATUS_LABEL[k]}</button>`).join('')}</div></div>
         <div class="form-group"><label>메모 (선택)</label><textarea id="s-memo" class="ta">${esc(d.memo)}</textarea></div>
         <div class="form-group"><label>🔗 관련 링크</label><div id="s-links"></div><button type="button" class="btn btn-ghost" style="margin-top:6px" onclick="addLinkRow()">＋ 링크</button></div>
-        ${isOwner?`<div class="form-group help-box"><label class="row" style="gap:6px;cursor:pointer"><input type="checkbox" id="s-help" ${d.needsHelp&&!d.helpResolved?'checked':''}> 🆘 관리자에게 도움요청</label><input id="s-help-note" class="mini-input" style="width:100%;margin-top:6px" placeholder="어디가 어려운지 (선택)" value="${esc(d.helpNote)}"></div>`:''}
+        ${isOwner?`<div class="form-group help-box"><label class="row" style="gap:6px;cursor:pointer"><input type="checkbox" id="s-help" ${d.needsHelp&&!d.helpResolved?'checked':''}> 🆘 도움요청</label><input id="s-help-note" class="mini-input" style="width:100%;margin-top:6px" placeholder="어디가 어려운지 (선택)" value="${esc(d.helpNote)}"></div>`:''}
         ${isBoss&&!isOwner?`<div class="form-group"><label>관리자 코멘트</label><textarea id="s-comment" class="ta">${esc(d.bossComment)}</textarea></div>`:''}
         <div class="modal-footer">${d.title?`<button class="btn btn-danger" id="slot-del">삭제</button>`:''}<button class="btn btn-ghost" onclick="closeModal()">취소</button><button class="btn btn-primary" id="slot-save">저장</button></div>`);
       let selStatus=d.status||'todo';
@@ -1370,8 +1370,8 @@ body{font-family:-apple-system,'Malgun Gothic','맑은 고딕',sans-serif;backgr
 .cal-head .th .d{font-size:10px;font-weight:500;color:var(--text-3);}
 .cal-head .th.today .d{color:var(--accent);}
 .cal-body{display:grid;grid-template-columns:56px repeat(7,1fr);max-height:calc(100vh - 260px);min-height:420px;overflow-y:auto;position:relative;}
-.cal-tcol{display:block;padding:0;}
-.cal-tcol .tl{font-size:10.5px;color:var(--text-3);text-align:right;padding-right:6px;transform:translateY(-6px);}
+.cal-tcol{display:block;padding:0;position:relative;}
+.cal-tcol .tl{position:absolute;right:6px;font-size:10.5px;color:var(--text-3);white-space:nowrap;}
 /* 근태 표 */
 .att-table{width:100%;border-collapse:collapse;font-size:13px;}
 .att-table th{text-align:left;font-size:11.5px;font-weight:700;color:var(--text-3);padding:6px 8px;border-bottom:1px solid var(--border);}
