@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- WorkBoard build 2026-07-05d (알림 클릭이동·삭제동기화·중복정리·3음 차임 + 관리자↔직원 일일 대화(daily.thread) 양방향) -->
+<!-- WorkBoard build 2026-07-05e (업무 시작시간 알람(다른 부저음) + 진행관리: 지금시작·실제시각·진행메모 + d:알림개편·일일대화) -->
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
@@ -353,7 +353,7 @@
   // ── 전체 실시간 리스너(이번 주 slots · 오늘 daily · routines) ──
   function wbStartRealtime(uid){
     unsubListeners.forEach(u=>{try{u();}catch(e){}}); unsubListeners=[];
-    wbNotifReset();
+    wbNotifReset(); startScheduleWatch();
     const ws=weekStart();
     try{
       unsubListeners.push(onSnapshot(query(collection(db,"slots"),where("uid","==",uid),where("weekStart","==",ws)),
@@ -416,8 +416,8 @@
     // 새 항목만 골라 알림
     const fresh=[]; curMap.forEach((v,k)=>{ if(!_notifSeen.has(k)) fresh.push(v); });
     _notifSeen = new Set(curMap.keys());   // 현재 존재하는 것만 기억 → 삭제됐다 다시 오면 재알림
-    // 리스트 동기화: 사라진(삭제된) 항목 제거 + 남은 항목 최신 내용으로 갱신
-    _notifList = _notifList.filter(it=>curMap.has(it.key)).map(it=>Object.assign({}, it, curMap.get(it.key)));
+    // 리스트 동기화: 사라진(삭제된) 항목 제거 + 남은 항목 최신 내용으로 갱신 (시작알림은 데이터기반이 아니므로 보존)
+    _notifList = _notifList.filter(it=> it.kind==='start' || curMap.has(it.key)).map(it=> it.kind==='start' ? it : Object.assign({}, it, curMap.get(it.key)));
     if(Date.now()>=_notifReadyAt){ fresh.sort((a,b)=>a.at-b.at).forEach(pushNotif); }
     renderNotifBell(); if(_notifOpen){ const p=$('notif-panel'); if(p) p.innerHTML=notifPanelHTML(); }
   }
@@ -434,7 +434,7 @@
   window.openNotif=(key)=>{
     const it=_notifList.find(x=>x.key===key); _notifOpen=false; const p=$('notif-panel'); if(p)p.style.display='none';
     if(!it) return; const uid=it.uid||wbUid||currentUser.uid;
-    if(it.kind==='chat'){ openBlockDetail(uid, it.slotId); }
+    if(it.kind==='chat'||it.kind==='start'){ openBlockDetail(uid, it.slotId); }   // 대화·시작알림 → 그 업무 열기
     else { openDailyChat(uid); }   // 지시·대화 → 관리자↔직원 대화창(그 자리에서 답장)
   };
   window.clearNotifs=()=>{ _notifList=[]; _notifUnread=0; renderNotifBell(); if(_notifOpen){ const p=$('notif-panel'); if(p) p.innerHTML=notifPanelHTML(); } };
@@ -442,7 +442,7 @@
   function notifPanelHTML(){
     const on=(typeof Notification!=='undefined') && Notification.permission==='granted' && localStorage.getItem('wbNotifBrowser')==='1';
     const soundOn=localStorage.getItem('wbNotifSound')!=='0';
-    const ic={chat:'💬',order:'📣',thread:'💬'};
+    const ic={chat:'💬',order:'📣',thread:'💬',start:'⏰'};
     const items=_notifList.length?_notifList.map(x=>{ const t=x.at?new Date(x.at*1000):null; const tt=t?`${t.getMonth()+1}/${t.getDate()} ${String(t.getHours()).padStart(2,'0')}:${String(t.getMinutes()).padStart(2,'0')}`:''; return `<div class="nt-row" onclick="openNotif('${x.key}')"><div class="nt-task">${ic[x.kind]||'🔔'} ${esc(x.task)} <span class="nt-go">열기 ›</span></div><div class="nt-text">${esc(x.who)}: ${esc(x.text||'')}</div><div class="nt-meta">${tt}</div></div>`; }).join(''):'<div class="muted" style="padding:16px;text-align:center">새 알림이 없습니다.</div>';
     return `<div class="nt-head"><b>알림</b><span class="nt-opts"><label class="nt-toggle"><input type="checkbox" ${soundOn?'checked':''} onchange="toggleNotifSound(this.checked)"> 소리</label><span class="nt-mini" onclick="notifPreview()">미리듣기</span><label class="nt-toggle"><input type="checkbox" ${on?'checked':''} onchange="toggleBrowserNotif(this.checked)"> 컴퓨터 알림</label></span></div><div class="nt-list">${items}</div>${_notifList.length?'<div class="nt-foot"><span class="nt-mini" onclick="clearNotifs()">모두 지우기</span></div>':''}`;
   }
@@ -459,8 +459,38 @@
     const t0=_audioCtx.currentTime; const notes=[[784,0],[988,0.16],[1319,0.32]];  // G5·B5·E6 3음 차임(길고 또렷)
     notes.forEach(([f,dt])=>{ const o=_audioCtx.createOscillator(), g=_audioCtx.createGain(); o.type='triangle'; o.frequency.value=f; o.connect(g); g.connect(_audioCtx.destination); const t=t0+dt; g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.34,t+0.03); g.gain.exponentialRampToValueAtTime(0.0001,t+0.5); o.start(t); o.stop(t+0.52); });
   }catch(e){} }
-  function showToast(msg){ let t=$('wb-toast'); if(!t){ t=el('div'); t.id='wb-toast'; t.className='wb-toast'; document.body.appendChild(t); } t.textContent=msg; t.classList.add('show'); clearTimeout(_toastT); _toastT=setTimeout(()=>t.classList.remove('show'),4600); }
+  function showToast(msg){ let t=$('wb-toast'); if(!t){ t=el('div'); t.id='wb-toast'; t.className='wb-toast'; document.body.appendChild(t); } t.textContent=msg; t.classList.add('show'); clearTimeout(_toastT); _toastT=setTimeout(()=>t.classList.remove('show'),5200); }
   document.addEventListener('click',(e)=>{ if(_notifOpen){ const w=e.target.closest&&e.target.closest('.notif-wrap'); if(!w){ _notifOpen=false; const p=$('notif-panel'); if(p)p.style.display='none'; } } });
+  // 업무 '시작 시간' 알람 — 메시지 차임과 다른 또렷한 부저음(스퀘어파 4연타)
+  window.alarmBeep=()=>{ if(localStorage.getItem('wbNotifSound')==='0') return; try{
+    _audioCtx=_audioCtx||new (window.AudioContext||window.webkitAudioContext)(); if(_audioCtx.state==='suspended'){ try{_audioCtx.resume();}catch(e){} }
+    const t0=_audioCtx.currentTime; const seq=[[660,0],[988,0.2],[660,0.4],[988,0.6]];
+    seq.forEach(([f,dt])=>{ const o=_audioCtx.createOscillator(), g=_audioCtx.createGain(); o.type='square'; o.frequency.value=f; o.connect(g); g.connect(_audioCtx.destination); const t=t0+dt; g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.26,t+0.02); g.gain.exponentialRampToValueAtTime(0.0001,t+0.18); o.start(t); o.stop(t+0.2); });
+  }catch(e){} };
+  // 오늘 내 스케줄의 시작 시각이 되면 알람
+  let _schedTimer=null, _startAlerted=new Set();
+  function startScheduleWatch(){ if(_schedTimer) clearInterval(_schedTimer); _startAlerted=new Set(); _schedTimer=setInterval(checkScheduleStart, 30000); }
+  function checkScheduleStart(){
+    try{
+      if(!currentUser) return; const uid=wbUid||currentUser.uid; if(uid!==currentUser.uid) return;   // 내 스케줄만 알람
+      const nowMin=toMin(nowHM()); if(nowMin==null) return; const t=today();
+      (wbCache.slots||[]).forEach(s=>{
+        if(s.date!==t || (s.status||'todo')==='done' || !bizMatch(s)) return;
+        const sm=slotStartMin(s); if(sm==null) return;
+        const key=s.id+'@'+t; if(_startAlerted.has(key)) return;
+        if(nowMin>=sm && nowMin<=sm+1){ _startAlerted.add(key); fireStartAlarm(s); }
+      });
+    }catch(e){}
+  }
+  function fireStartAlarm(s){
+    alarmBeep();
+    showToast(`⏰ 지금 시작할 시간! ${s.title||'업무'} (${minHM(slotStartMin(s))}~)`);
+    _notifList = _notifList.filter(it=>it.key!=='start:'+s.id+'@'+today());
+    _notifList.unshift({key:'start:'+s.id+'@'+today(), kind:'start', task:'⏰ 시작 시간', who:'스케줄', text:`'${s.title||'업무'}' 시작 시간이에요`, at:Math.floor(Date.now()/1000), uid:s.uid||wbUid||currentUser.uid, slotId:s.id});
+    if(_notifList.length>30)_notifList.pop(); _notifUnread++; renderNotifBell();
+    if(_notifOpen){ const p=$('notif-panel'); if(p)p.innerHTML=notifPanelHTML(); }
+    if(typeof Notification!=='undefined' && Notification.permission==='granted' && localStorage.getItem('wbNotifBrowser')==='1'){ try{ new Notification('⏰ 업무 시작 시간', {body:`'${s.title||'업무'}' 시작할 시간이에요 (${minHM(slotStartMin(s))})`}); }catch(e){} }
+  }
 
   // ── 관리자 ↔ 직원 대화(하루 단위 스레드) : 지시에 바로 답장 ──
   let _dcUnsub=null;
@@ -635,7 +665,10 @@
       <div class="form-group"><label>상태</label><div class="seg-group modal-seg">${['done','wip','todo'].map(k=>`<button class="seg" data-s="${k}">${k==='todo'?'못함':STATUS_LABEL[k]}</button>`).join('')}</div></div>
       <div class="form-group"><label>제목</label><input id="bd-title" class="mini-input" style="width:100%" value="${esc(d.title)}"></div>
       <div class="form-group"><label>프로젝트</label><select id="bd-biz" class="mini-input" style="width:100%">${bizOptions(d.biz||'')}</select></div>
-      <div class="row" style="gap:6px"><div class="form-group" style="flex:1"><label>시작</label><input id="bd-start" type="time" step="1800" class="mini-input" style="width:100%" value="${d.startTime||d.plannedTime||''}"></div><div class="form-group" style="flex:1"><label>종료</label><input id="bd-end" type="time" step="1800" class="mini-input" style="width:100%" value="${d.endTime||''}"></div></div>
+      <div class="row" style="gap:6px"><div class="form-group" style="flex:1"><label>계획 시작</label><input id="bd-start" type="time" step="1800" class="mini-input" style="width:100%" value="${d.startTime||d.plannedTime||''}"></div><div class="form-group" style="flex:1"><label>계획 종료</label><input id="bd-end" type="time" step="1800" class="mini-input" style="width:100%" value="${d.endTime||''}"></div></div>
+      <div class="form-group"><label>진행 관리 <span class="muted">(계획과 달라질 때)</span></label>
+        <div class="row" style="gap:6px;align-items:center;flex-wrap:wrap"><button type="button" class="btn btn-ghost" onclick="markStartNow('${slotId}')">⏱ 지금부터 시작</button>${d.startedAt?`<span class="pill" style="background:#e8f7ee;color:#137a3a">실제 시작 ${esc(d.startedAt)}</span>`:'<span class="muted">시작하면 실제 시각이 기록돼요</span>'}</div>
+        <textarea id="bd-memo" class="ta" style="height:52px;margin-top:6px" placeholder="진행 메모 (예: 30분 지연·자재 대기·계획보다 앞당김). 계획 시간은 위에서 바로 조정하세요.">${esc(d.memo||'')}</textarea></div>
       <div class="form-group"><label>💬 대화 <span class="muted">(실시간)</span></label><div class="thread" id="bd-thread"><div class="empty2">불러오는 중…</div></div>
         <div class="reply"><input id="bd-reply" placeholder="메시지 입력 · Enter" onkeydown="if(event.key==='Enter')sendBlockMsg('${slotId}')"><button class="btn btn-primary" onclick="sendBlockMsg('${slotId}')">전송</button></div></div>
       <div class="modal-footer"><button class="btn btn-danger" onclick="deleteBlock('${slotId}')">삭제</button><button class="btn btn-ghost" onclick="closeBlockDetail()">닫기</button><button class="btn btn-primary" onclick="saveBlock('${slotId}')">저장</button></div>`);
@@ -685,8 +718,14 @@
   window.saveBlock = async (slotId)=>{
     const title=$('bd-title').value.trim(); if(!title){ alert('제목을 입력하세요'); return; }
     const st=$('bd-start').value, en=$('bd-end').value; if(st&&en&&en<=st){ alert('종료가 시작보다 늦어야 합니다'); return; }
-    await setDoc(doc(db,"slots",slotId),{ title, biz:$('bd-biz')?.value||'', status:window.__bdStatus||'todo', startTime:st||'', endTime:en||'', plannedTime:st||'', updatedAt:Timestamp.now() },{merge:true});
+    await setDoc(doc(db,"slots",slotId),{ title, biz:$('bd-biz')?.value||'', status:window.__bdStatus||'todo', startTime:st||'', endTime:en||'', plannedTime:st||'', memo:$('bd-memo')?.value.trim()||'', updatedAt:Timestamp.now() },{merge:true});
     closeBlockDetail();
+  };
+  window.markStartNow = async (slotId)=>{
+    const t=nowHM();
+    try{ await setDoc(doc(db,"slots",slotId),{ startedAt:t, status:'wip', updatedAt:Timestamp.now() },{merge:true}); }catch(e){ alert(fbErr(e)); return; }
+    window.__bdStatus='wip'; document.querySelectorAll('.modal-seg .seg').forEach(x=>{ x.className='seg'; if(x.dataset.s==='wip') x.classList.add('on','seg-wip'); });
+    alert('실제 시작 시간을 '+t+'(으)로 기록했어요. 계획 시간이 달라졌다면 위 시작·종료를 조정하고 저장하세요.');
   };
   window.deleteBlock = async (slotId)=>{ if(!confirm('이 업무를 삭제할까요?')) return; await deleteDoc(doc(db,"slots",slotId)); closeBlockDetail(); };
   window.closeBlockDetail = ()=>{ if(_threadUnsub){try{_threadUnsub();}catch(e){} _threadUnsub=null;} closeModal(); };
