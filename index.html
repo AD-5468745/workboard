@@ -40,7 +40,7 @@
   };
   const HOURS = hoursRange();
   const DAYS  = ["월","화","수","목","금","토","일"];
-  const STATUS_LABEL = { done:"완료", wip:"진행중", todo:"미완", skip:"미완" };
+  const STATUS_LABEL = { done:"완료", wip:"진행중", todo:"대기", skip:"대기" };
   const SVAR = { done:"var(--success)", wip:"var(--warn)", todo:"var(--text-3)", skip:"var(--text-3)" };
   const toMin = t => { const m=/^(\d{1,2}):(\d{2})/.exec(t||""); return m?(+m[1])*60+(+m[2]):null; };
   const nowHM = () => { const d=new Date(); return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"); };
@@ -629,7 +629,8 @@
     await loadCategories(); const cm=catMapOf();
     let slots;
     if(isThis){ slots=(wbCache.slots||[]).slice(); }
-    else { const snap=await getDocs(query(collection(db,"slots"),where("uid","==",uid),where("weekStart","==",ws))); slots=[]; snap.forEach(d=>slots.push({id:d.id,...d.data()})); }
+    else { try{ const snap=await getDocs(query(collection(db,"slots"),where("uid","==",uid),where("weekStart","==",ws))); slots=[]; snap.forEach(d=>slots.push({id:d.id,...d.data()})); }
+      catch(e){ console.error('[WB] 주 불러오기',e); slots=[]; showToast('이 주 일정을 불러오지 못했어요. 인터넷 확인 후 다시 시도해 주세요.'); } }
     slots=slots.filter(bizMatch);   // 선택된 사업만(통합이면 전체)
     const wsDate=new Date(ws+"T00:00:00"); const dayList=[];
     for(let i=0;i<7;i++){ const dd=new Date(wsDate); dd.setDate(dd.getDate()+i); dayList.push(ymd(dd)); }
@@ -770,7 +771,7 @@
     const st=d.status||'todo'; const timeTxt=(d.startTime||d.plannedTime||'')+(d.endTime?('–'+d.endTime):'');
     showModal(`<div class="modal-title">${esc(d.title)}</div>
       <div class="muted" style="margin-bottom:12px">${d.category&&cm[d.category]?esc(cm[d.category].name)+' · ':''}${esc(timeTxt)}${d.assignedBy?' · 관리자 배정':''}</div>
-      <div class="form-group"><label>상태</label><div class="seg-group modal-seg">${['done','wip','todo'].map(k=>`<button class="seg" data-s="${k}">${k==='todo'?'못함':STATUS_LABEL[k]}</button>`).join('')}</div></div>
+      <div class="form-group"><label>상태</label><div class="seg-group modal-seg">${['done','wip','todo'].map(k=>`<button class="seg" data-s="${k}">${k==='todo'?'대기':STATUS_LABEL[k]}</button>`).join('')}</div></div>
       <div class="form-group"><label>제목</label><input id="bd-title" class="mini-input" style="width:100%" value="${esc(d.title)}"></div>
       <div class="form-group"><label>프로젝트</label><select id="bd-biz" class="mini-input" style="width:100%">${bizOptions(d.biz||'')}</select></div>
       ${(d.guide||'').trim()?`<div class="form-group"><label>작업 방법 <span class="muted">(필수업무 절차)</span></label><div class="rt-guide" style="margin-top:0">${esc(d.guide)}</div></div>`:''}
@@ -835,8 +836,13 @@
   window.markStartNow = async (slotId)=>{
     const t=nowHM();
     try{ await setDoc(doc(db,"slots",slotId),{ startedAt:t, status:'wip', updatedAt:Timestamp.now() },{merge:true}); }catch(e){ alert(fbErr(e)); return; }
-    window.__bdStatus='wip'; document.querySelectorAll('.modal-seg .seg').forEach(x=>{ x.className='seg'; if(x.dataset.s==='wip') x.classList.add('on','seg-wip'); });
-    alert('실제 시작 시간을 '+t+'(으)로 기록했어요. 계획 시간이 달라졌다면 위 시작·종료를 조정하고 저장하세요.');
+    const inModal = !!document.querySelector('.modal-seg');
+    if(inModal){ // 업무 상세창 안에서 누른 경우: 상태 세그 갱신 + 안내
+      window.__bdStatus='wip'; document.querySelectorAll('.modal-seg .seg').forEach(x=>{ x.className='seg'; if(x.dataset.s==='wip') x.classList.add('on','seg-wip'); });
+      alert('실제 시작 시간을 '+t+'(으)로 기록했어요. 계획 시간이 달라졌다면 위 시작·종료를 조정하고 저장하세요.');
+    } else { // 집중배너 등에서 누른 경우: 가벼운 토스트만
+      showToast('▶ 시작 기록: '+t);
+    }
   };
   // 캘린더/집중배너에서 한 번에 완료 토글(모달 안 열고)
   window.quickToggleDone = async (uid, slotId)=>{
@@ -1110,13 +1116,13 @@
     row.innerHTML=`
       <span class="star" onclick="toggleImportant('${uid}','${t.id}')" title="중요 표시">${t.important?'★':'☆'}</span>
       <div class="task-main">
-        <div class="task-title">${esc(t.title)}${carried?' <span class="pill pill-carry">이월</span>':''}${t.needsHelp&&!t.helpResolved?' <span class="pill pill-help">도움요청</span>':''}</div>
+        <div class="task-title">${esc(t.title)}${carried?' <span class="pill pill-carry">이월</span>':''}${t.needsHelp&&!t.helpResolved?` <span class="pill pill-help" onclick="event.stopPropagation();resolveHelp('${uid}','${t.id}')" title="눌러서 해결 처리">도움요청 ✕</span>`:''}</div>
         <div class="task-sub">${(t.plannedTime||t.hour)?`<span class="task-meta">${t.plannedTime||t.hour}</span>`:''}${subLine}</div>
         ${(t.links||[]).length?`<div class="task-links">${linkPills(t.links)}</div>`:''}
         ${t.bossComment?`<div class="boss-inline">👑 ${esc(t.bossComment)}</div>`:''}
         ${subBox}
       </div>
-      <div class="seg-group">${seg('done','완료','seg-done')}${seg('wip','진행','seg-wip')}${seg('todo','못함','seg-todo')}</div>
+      <div class="seg-group">${seg('done','완료','seg-done')}${seg('wip','진행','seg-wip')}${seg('todo','대기','seg-todo')}</div>
       <span class="more" onclick="openTaskDetail('${uid}','${t.id}')" title="상세">⋯</span>`;
     return row;
   }
@@ -1134,6 +1140,12 @@
     await setDoc(doc(db,"slots",id),{status,updatedAt:Timestamp.now()},{merge:true});
     if(t.fromRoutine) mirrorRoutineDone(t.fromRoutine, t.uid||uid, status==='done');
     syncGoals(uid);
+  };
+  window.resolveHelp = async (uid, id) => {
+    if(!confirm('이 도움요청을 해결 처리할까요?')) return;
+    const t=todayTasks.find(x=>x.id===id); if(t){ t.needsHelp=false; t.helpResolved=true; }
+    try{ await setDoc(doc(db,"slots",id),{ needsHelp:false, helpResolved:true, updatedAt:Timestamp.now() },{merge:true}); }catch(e){ alert(fbErr(e)); return; }
+    renderTaskList(uid);
   };
   window.toggleImportant = async (uid, id) => {
     const t=todayTasks.find(x=>x.id===id); if(!t) return;
@@ -1338,7 +1350,7 @@
       html=`<div class="mode mode-am"><i class="mi">☀️</i><div><div class="mt">계획 시간 · ${left}분 남음</div><div class="ms">오늘 할 일을 한 번 더 정리하세요. 어제 못한 일은 위에 이월돼 있어요.</div></div></div>`;
     } else if(we!=null && now>=we-20 && now<we+90){
       const left=Math.max(0,we-now);
-      html=`<div class="mode mode-pm"><i class="mi">🌇</i><div><div class="mt">마무리 체크 · ${left>0?left+'분 남음':'퇴근 시간'}</div><div class="ms">오늘 한 일을 완료/진행/못함으로 체크하고, '하루 마무리'에서 내일 계획을 적어주세요.</div></div></div>`;
+      html=`<div class="mode mode-pm"><i class="mi">🌇</i><div><div class="mt">마무리 체크 · ${left>0?left+'분 남음':'퇴근 시간'}</div><div class="ms">오늘 한 일을 완료/진행/대기로 체크하고, 아래 '내일 계획'을 적어주세요.</div></div></div>`;
     }
     box.innerHTML=html;
   }
@@ -1551,7 +1563,7 @@
       showModal(`
         <div class="modal-title">시간별 업무 — ${date} ${hour}</div>
         <div class="form-group"><label>업무 내용</label><input id="s-title" class="mini-input" style="width:100%" value="${esc(d.title)}"></div>
-        <div class="form-group"><label>상태</label><div class="seg-group modal-seg">${['done','wip','todo'].map(k=>`<button class="seg" data-s="${k}">${k==='todo'?'미완':STATUS_LABEL[k]}</button>`).join('')}</div></div>
+        <div class="form-group"><label>상태</label><div class="seg-group modal-seg">${['done','wip','todo'].map(k=>`<button class="seg" data-s="${k}">${k==='todo'?'대기':STATUS_LABEL[k]}</button>`).join('')}</div></div>
         <div class="form-group"><label>메모 (선택)</label><textarea id="s-memo" class="ta">${esc(d.memo)}</textarea></div>
         <div class="form-group"><label>🔗 관련 링크</label><div id="s-links"></div><button type="button" class="btn btn-ghost" style="margin-top:6px" onclick="addLinkRow()">＋ 링크</button></div>
         ${isOwner?`<div class="form-group help-box"><label class="row" style="gap:6px;cursor:pointer"><input type="checkbox" id="s-help" ${d.needsHelp&&!d.helpResolved?'checked':''}> 🆘 도움요청</label><input id="s-help-note" class="mini-input" style="width:100%;margin-top:6px" placeholder="어디가 어려운지 (선택)" value="${esc(d.helpNote)}"></div>`:''}
@@ -1743,7 +1755,7 @@
       const card=el('div','team-card');
       card.innerHTML=`<div class="team-card-header"><div class="staff-avatar" style="background:${s.color||'#4f6bed'}">${(s.displayName||'?')[0]}</div><div><div class="team-name">${s.displayName||s.email}</div><div class="muted" style="font-size:11px">${att}</div></div><div class="team-pct" style="color:${pc}">${pct}%</div></div>
         <div class="progress-bar"><div style="width:${pct}%;background:${pc}"></div></div>
-        <div class="team-stats"><span class="ontime">완료 ${done}</span><span style="color:var(--warn)">진행 ${wip}</span><span class="muted">미완 ${undone}</span><span style="margin-left:auto;color:var(--accent-text)">★ ${goalsDone}/${goals.length}</span></div>
+        <div class="team-stats"><span class="ontime">완료 ${done}</span><span style="color:var(--warn)">진행 ${wip}</span><span class="muted">대기 ${undone}</span><span style="margin-left:auto;color:var(--accent-text)">★ ${goalsDone}/${goals.length}</span></div>
         ${blocker?`<div class="team-alert danger">🚨 ${esc(blocker)}</div>`:''}
         ${anom.length?`<div class="team-alert warn">⚠️ ${esc(anom.join(' · '))}</div>`:''}
         ${feedback?`<div class="team-feedback">"${esc(feedback.slice(0,80))}${feedback.length>80?'…':''}"</div>`:'<div class="team-feedback muted">아직 피드백 없음</div>'}
