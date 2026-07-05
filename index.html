@@ -933,6 +933,10 @@
     p.innerHTML=`
       <div class="link-conn">🔗 캘린더의 오늘 업무가 여기 <b>주제별</b>로 모입니다. 상태를 바꾸면 캘린더 음영도 같이 바뀝니다. (출퇴근은 <b>🕘 출퇴근기록</b> 탭)</div>
       <div class="sec-head"><span class="sec-title">오늘 할 일 <span class="muted" style="font-weight:400">· 주제별</span></span><span><span class="link-btn" onclick="openCategoryManager('${uid}')" style="margin-right:12px">주제 관리</span><span id="save-status" class="muted"></span></span></div>
+      <div class="task-tools">
+        <input id="task-search" class="task-search" placeholder="🔎 오늘 할 일 검색" value="${escAttr(window.__taskQuery||'')}" oninput="window.__taskQuery=this.value; renderTaskList(wbUid||currentUser.uid)">
+        <label class="task-filter"><input type="checkbox" id="task-open-only" ${window.__taskOpenOnly?'checked':''} onchange="window.__taskOpenOnly=this.checked; renderTaskList(wbUid||currentUser.uid)"> 미완만 보기</label>
+      </div>
       <div id="task-list"></div>
       <div class="add-row"><i class="add-plus">＋</i><input id="new-task" class="add-input" placeholder="한 줄씩 추가 · Enter" onkeydown="if(event.key==='Enter')addTask('${uid}')"><button class="btn btn-primary" onclick="addTask('${uid}')">추가</button></div>
       <div style="margin-top:8px"><span class="link-btn" onclick="toggleBulk()">여러 개 한번에 붙여넣기 ▾</span></div>
@@ -1133,8 +1137,12 @@
   }
   function renderTaskList(uid){
     const box=$('task-list'); if(!box) return;
-    const tlist=todayTasks.filter(bizMatch);   // 선택된 사업만
-    if(!tlist.length){ box.innerHTML='<div class="empty">아직 오늘 할 일이 없어요. 아래에 한 줄 적어보세요.</div>'; updateMissCheck(); return; }
+    let tlist=todayTasks.filter(bizMatch);   // 선택된 사업만
+    const hasAny=tlist.length>0;
+    const q=(window.__taskQuery||'').trim().toLowerCase();
+    if(q) tlist=tlist.filter(t=>(t.title||'').toLowerCase().includes(q)||(t.incompleteReason||'').toLowerCase().includes(q));
+    if(window.__taskOpenOnly) tlist=tlist.filter(t=>(t.status||'todo')!=='done');
+    if(!tlist.length){ box.innerHTML=`<div class="empty">${hasAny?'조건에 맞는 할 일이 없어요. 검색·필터를 바꿔보세요.':'아직 오늘 할 일이 없어요. 아래에 한 줄 적어보세요.'}</div>`; updateMissCheck(); return; }
     const cm=catMapOf();
     const groups=new Map();
     tlist.forEach(t=>{ const cid=(t.category && cm[t.category])?t.category:'__none__'; if(!groups.has(cid))groups.set(cid,[]); groups.get(cid).push(t); });
@@ -1711,7 +1719,7 @@
       item.addEventListener('click',()=>selectStaff(s,staffList)); sidebar.appendChild(item);
     }
     const all=el('div','view-all','📊 팀 전체 보기'); all.addEventListener('click',()=>renderTeamOverview(staffList)); sidebar.appendChild(all);
-    if(staffList.length>0) selectStaff(staffList[0],staffList); else main.innerHTML='<div class="empty">등록된 직원이 없습니다</div>';
+    if(staffList.length>0) renderTeamOverview(staffList); else main.innerHTML='<div class="empty">등록된 직원이 없습니다</div>';   // 기본 랜딩 = 팀 전체 현황
   }
   let _curStaff=null;
   function selectStaff(s, staffList){ selectedStaffUid=s.uid; document.querySelectorAll('.staff-item').forEach(i=>i.classList.toggle('active',i.dataset.uid===s.uid)); renderBossStaffDetail(s); }
@@ -1835,12 +1843,16 @@
       const card=el('div','team-card');
       card.innerHTML=`<div class="team-card-header"><div class="staff-avatar" style="background:${s.color||'#4f6bed'}">${(s.displayName||'?')[0]}</div><div><div class="team-name">${s.displayName||s.email}</div><div class="muted" style="font-size:11px">${att}</div></div><div class="team-pct" style="color:${pc}">${pct}%</div></div>
         <div class="progress-bar"><div style="width:${pct}%;background:${pc}"></div></div>
-        <div class="team-stats"><span class="ontime">완료 ${done}</span><span style="color:var(--warn)">진행 ${wip}</span><span class="muted">대기 ${undone}</span><span style="margin-left:auto;color:var(--accent-text)">★ ${goalsDone}/${goals.length}</span></div>
+        <div class="team-stats"><span class="ontime">완료 ${done}</span><span style="color:var(--warn)">진행 ${wip}</span><span class="muted">미완료 ${undone}</span><span style="margin-left:auto;color:var(--accent-text)">★ ${goalsDone}/${goals.length}</span></div>
         ${blocker?`<div class="team-alert danger">🚨 ${esc(blocker)}</div>`:''}
         ${anom.length?`<div class="team-alert warn">⚠️ ${esc(anom.join(' · '))}</div>`:''}
         ${feedback?`<div class="team-feedback">"${esc(feedback.slice(0,80))}${feedback.length>80?'…':''}"</div>`:'<div class="team-feedback muted">아직 피드백 없음</div>'}
-        <button class="btn btn-ghost" style="width:100%;margin-top:10px" onclick="event.stopPropagation()">상세 보기 →</button>`;
-      card.querySelector('button').addEventListener('click',()=>selectStaff(s,staffList)); grid.appendChild(card);
+        <div class="row" style="gap:6px;margin-top:10px">
+          <button class="btn btn-ghost" style="flex:1" onclick="event.stopPropagation();openBossCommentModal('${s.uid}','${escAttr(s.displayName||s.email)}')">📣 지시</button>
+          <button class="btn btn-ghost" style="flex:1" onclick="event.stopPropagation();openDailyChat('${s.uid}')">💬 대화</button>
+          <button class="btn btn-primary tc-detail" style="flex:1">상세 →</button>
+        </div>`;
+      card.querySelector('.tc-detail').addEventListener('click',()=>selectStaff(s,staffList)); grid.appendChild(card);
     }
     const aw=$('team-alerts'); if(aw&&alerts.length) aw.innerHTML=`<div class="banner warn"><b>⚠️ 주목 ${alerts.length}건</b> · ${alerts.map(a=>esc(`${a.name}: ${a.text}`)).join(' · ')}</div>`;
     const bw=$('team-banner'); const items=[]; blockers.forEach(b=>items.push(`${b.name} (${b.text})`)); helps.forEach(h=>items.push(`${h.name} — ${h.title}`));
@@ -1956,6 +1968,10 @@ body{font-family:-apple-system,'Malgun Gothic','맑은 고딕',sans-serif;backgr
 .fld.danger{color:var(--danger);}
 .link-btn{font-size:12px;color:var(--accent);cursor:pointer;white-space:nowrap;}
 .link-btn:hover{text-decoration:underline;}
+.task-tools{display:flex;gap:10px;align-items:center;margin:0 0 10px;}
+.task-search{flex:1;border:1px solid var(--border);border-radius:8px;padding:7px 11px;font-size:13px;background:var(--surface-2);color:var(--text);outline:none;}
+.task-search:focus{border-color:var(--accent);}
+.task-filter{font-size:12.5px;color:var(--text-2);display:flex;align-items:center;gap:5px;white-space:nowrap;cursor:pointer;}
 
 /* 탭 */
 .tabbar{display:inline-flex;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:3px;gap:2px;}
