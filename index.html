@@ -1812,7 +1812,7 @@
     const md=(await getDoc(dailyRef)).data()||{};
     const mli=lateInfo(md.clockIn,s.workStart);
     const att=md.clockIn?`출근 ${md.clockIn}${mli.late?` · 지각 ${mli.mins}분`:' · 정상'}${md.clockOut?` · 퇴근 ${md.clockOut}`:''}`:'미출근';
-    let rtTxt=''; try{ const rSnap=await getDocs(collection(db,"routines")); let rTot=0,rDone=0; const ds=new Set(md.routinesDone||[]); rSnap.forEach(r=>{const d=r.data(); if(d.active!==false&&(d.targetUid==='all'||d.targetUid===s.uid)){rTot++; if(ds.has(r.id))rDone++;}}); if(rTot>0) rtTxt=` · 필수업무 ${rDone}/${rTot}`; }catch(e){}
+    let rtTxt=''; try{ const rSnap=await getDocs(collection(db,"routines")); let rTot=0,rDone=0; const ds=new Set(md.routinesDone||[]); rSnap.forEach(r=>{const d=r.data(); if(d.active!==false&&(d.targetUid==='all'||d.targetUid===s.uid)&&dayMatch(d,today())){rTot++; if(ds.has(r.id))rDone++;}}); if(rTot>0) rtTxt=` · 필수업무 ${rDone}/${rTot}`; }catch(e){}
     const meta=$('staff-meta'); if(meta) meta.textContent=`오늘 완료 ${done}/${total}${rtTxt} · ${att}`;
     await loadCategories();
     const wrap=$('boss-today-slots');
