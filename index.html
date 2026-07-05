@@ -1830,7 +1830,7 @@
 :root{
   --bg:#f4f6fa; --surface:#ffffff; --surface-2:#f7f8fb; --soft:#fbfcfe;
   --border:#e6e9f0; --border-strong:#d5dae4;
-  --text:#1f2430; --text-2:#5b6472; --text-3:#98a0ae;
+  --text:#1f2430; --text-2:#515a68; --text-3:#6b7280;
   --accent:#4f6bed; --accent-bg:#eef1fd; --accent-text:#3a4fc4;
   --success:#16a34a; --success-bg:#e8f7ee;
   --warn:#d97706; --warn-bg:#fdf3e3;
@@ -1944,6 +1944,8 @@ body{font-family:-apple-system,'Malgun Gothic','맑은 고딕',sans-serif;backgr
 .mini-input:focus{border-color:var(--accent);background:#fff;}
 .ta{width:100%;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:10px 12px;outline:none;resize:vertical;height:64px;font-family:inherit;line-height:1.6;}
 .ta:focus{border-color:var(--accent);background:#fff;}
+/* 키보드 포커스 링(마우스 클릭 땐 안 뜸) — 접근성·완성도 */
+.btn:focus-visible,.mini-input:focus-visible,.ta:focus-visible,.login-input:focus-visible,.add-input:focus-visible,.sub-inp:focus-visible,select:focus-visible,.seg:focus-visible,.wb-tabbtn:focus-visible,.biz-btn:focus-visible,.link-btn:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px;}
 
 /* 모드 배너 */
 .mode{display:flex;align-items:center;gap:12px;border-radius:12px;padding:12px 15px;margin-bottom:14px;animation:slideIn .4s ease both;}
