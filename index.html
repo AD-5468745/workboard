@@ -476,8 +476,8 @@
     seq.forEach(([f,dt])=>{ const o=_audioCtx.createOscillator(), g=_audioCtx.createGain(); o.type='square'; o.frequency.value=f; o.connect(g); g.connect(_audioCtx.destination); const t=t0+dt; g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.26,t+0.02); g.gain.exponentialRampToValueAtTime(0.0001,t+0.18); o.start(t); o.stop(t+0.2); });
   }catch(e){} };
   // 오늘 내 스케줄의 시작 시각이 되면 알람
-  let _schedTimer=null, _startAlerted=new Set();
-  function startScheduleWatch(){ if(_schedTimer) clearInterval(_schedTimer); _startAlerted=new Set(); _schedTimer=setInterval(checkScheduleStart, 30000); }
+  let _schedTimer=null, _startAlerted=new Set(), _endAlerted=new Set();
+  function startScheduleWatch(){ if(_schedTimer) clearInterval(_schedTimer); _startAlerted=new Set(); _endAlerted=new Set(); _schedTimer=setInterval(()=>{ checkScheduleStart(); checkScheduleEnd(); }, 30000); }
   function checkScheduleStart(){
     try{
       if(!currentUser) return; const uid=wbUid||currentUser.uid; if(uid!==currentUser.uid) return;   // 내 스케줄만 알람
@@ -499,6 +499,61 @@
     if(_notifOpen){ const p=$('notif-panel'); if(p)p.innerHTML=notifPanelHTML(); }
     if(typeof Notification!=='undefined' && Notification.permission==='granted' && localStorage.getItem('wbNotifBrowser')==='1'){ try{ new Notification('⏰ 업무 시작 시간', {body:`'${s.title||'업무'}' 시작할 시간이에요 (${minHM(slotStartMin(s))})`}); }catch(e){} }
   }
+  // 오늘 내 업무의 '종료 10분 전' → 곧 종료 알림 + 지연 밀기 결정
+  function checkScheduleEnd(){
+    try{
+      if(!currentUser) return; const uid=wbUid||currentUser.uid; if(uid!==currentUser.uid) return;   // 내 스케줄만
+      const ov=$('modal-overlay'); if(ov && ov.style.display==='flex') return;   // 다른 창 열려있으면 방해 안 함(다음 틱)
+      const nowMin=toMin(nowHM()); if(nowMin==null) return; const t=today();
+      (wbCache.slots||[]).forEach(s=>{
+        if(s.date!==t || (s.status||'todo')==='done' || !s.endTime || !bizMatch(s)) return;
+        const em=slotEndMin(s); if(em==null) return;
+        const key=s.id+'@'+t; if(_endAlerted.has(key)) return;
+        if(nowMin>=em-10 && nowMin<em){ _endAlerted.add(key); fireEndWarning(s, Math.max(0,em-nowMin)); }
+      });
+    }catch(e){}
+  }
+  function fireEndWarning(s, remain){
+    alarmBeep();
+    const em=slotEndMin(s);
+    showModal(`<div class="modal-title">⏰ 곧 종료 예정</div>
+      <div style="margin-bottom:14px;line-height:1.6">'<b>${esc(s.title||'업무')}</b>'이(가) <b>${remain}분 뒤(${minHM(em)})</b> 종료 예정이에요.<br>예정대로 끝나면 그대로 두고, 더 걸리면 <b>뒤 일정을 밀 수</b> 있어요.</div>
+      <div class="muted" style="margin-bottom:8px">얼마나 더 필요하세요? (이 업무 뒤 오늘 일정이 그만큼 함께 밀려요)</div>
+      <div class="row" style="gap:6px;flex-wrap:wrap">
+        <button class="btn btn-ghost" onclick="pushSchedule('${s.id}',15)">+15분 밀기</button>
+        <button class="btn btn-ghost" onclick="pushSchedule('${s.id}',30)">+30분 밀기</button>
+        <button class="btn btn-ghost" onclick="pushSchedule('${s.id}',60)">+1시간 밀기</button>
+      </div>
+      <div class="modal-footer"><button class="btn btn-primary" onclick="closeModal()">예정대로 (안 밀기)</button></div>`);
+  }
+  // 지연 밀기: 앵커 업무 종료를 delta만큼 늘리고, 그 뒤 오늘 업무를 delta만큼 이동
+  window.pushSchedule = async (slotId, delta) => {
+    const anchor=(wbCache.slots||[]).find(x=>x.id===slotId); if(!anchor){ closeModal(); return; }
+    const uid=anchor.uid||wbUid||currentUser.uid; const t=anchor.date||today();
+    const anchorEnd=slotEndMin(anchor); if(anchorEnd==null){ closeModal(); return; }
+    const CAP=23*60+59; const cap=(m)=>Math.min(m,CAP);
+    const later=(wbCache.slots||[]).filter(s=> s.date===t && (s.uid||uid)===uid && s.id!==anchor.id && slotStartMin(s)!=null && slotStartMin(s)>=anchorEnd && (s.status||'todo')!=='done');
+    const changes=[{id:anchor.id, startTime:anchor.startTime||'', endTime:anchor.endTime||'', plannedTime:anchor.plannedTime||''}];
+    const ops=[ setDoc(doc(db,"slots",anchor.id),{endTime:minHM(cap(anchorEnd+delta)),updatedAt:Timestamp.now()},{merge:true}) ];
+    let overflow=false;
+    later.forEach(s=>{
+      changes.push({id:s.id, startTime:s.startTime||'', endTime:s.endTime||'', plannedTime:s.plannedTime||''});
+      const sm=slotStartMin(s), emx=(slotEndMin(s)!=null?slotEndMin(s):sm+30);
+      const ns=sm+delta, ne=emx+delta; if(ns>CAP||ne>CAP) overflow=true;
+      const nStart=minHM(cap(ns));
+      ops.push(setDoc(doc(db,"slots",s.id),{startTime:nStart, plannedTime:nStart, endTime:minHM(cap(ne)), updatedAt:Timestamp.now()},{merge:true}));
+    });
+    try{ await Promise.all(ops); }catch(e){ alert(fbErr(e)); return; }
+    window.__lastPush={items:changes}; _endAlerted.delete(anchor.id+'@'+t);   // 새 종료시각에 다시 알림 가능
+    showModal(`<div class="modal-title">✅ 일정을 밀었어요</div>
+      <div style="margin-bottom:14px;line-height:1.6">'<b>${esc(anchor.title||'업무')}</b>' 종료를 <b>${delta}분</b> 늘리고, 뒤 업무 <b>${later.length}개</b>를 ${delta}분씩 뒤로 옮겼어요.${overflow?'<br><span style="color:var(--warn)">※ 일부 업무가 근무시간을 넘어 끝시간(23:59)에 맞춰 조정됐어요.</span>':''}</div>
+      <div class="modal-footer"><button class="btn btn-ghost" onclick="undoPush()">되돌리기</button><button class="btn btn-primary" onclick="closeModal()">확인</button></div>`);
+  };
+  window.undoPush = async () => {
+    const p=window.__lastPush; if(!p||!p.items){ closeModal(); return; }
+    try{ await Promise.all(p.items.map(it=>setDoc(doc(db,"slots",it.id),{startTime:it.startTime,endTime:it.endTime,plannedTime:it.plannedTime,updatedAt:Timestamp.now()},{merge:true}))); }catch(e){ alert(fbErr(e)); return; }
+    window.__lastPush=null; closeModal(); showToast('되돌렸어요.');
+  };
 
   // ── 관리자 ↔ 직원 대화(하루 단위 스레드) : 지시에 바로 답장 ──
   let _dcUnsub=null;
