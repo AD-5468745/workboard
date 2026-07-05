@@ -13,7 +13,7 @@
     updatePassword, reauthenticateWithCredential, EmailAuthProvider }
     from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
   import { getFirestore, doc, setDoc, getDoc, collection, query, where,
-    getDocs, onSnapshot, orderBy, Timestamp, deleteDoc, addDoc }
+    getDocs, onSnapshot, orderBy, Timestamp, deleteDoc, addDoc, arrayUnion }
     from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
   const firebaseConfig = {
@@ -588,14 +588,14 @@
       <div class="reply"><input id="dc-reply" placeholder="메시지 입력 · Enter" onkeydown="if(event.key==='Enter')sendDailyMsg('${uid}')"><button class="btn btn-primary" onclick="sendDailyMsg('${uid}')">전송</button></div>
       <div class="modal-footer"><button class="btn btn-ghost" onclick="closeDailyChat()">닫기</button></div>`);
     if(_dcUnsub){try{_dcUnsub();}catch(e){}}
-    _dcUnsub=onSnapshot(ref, s=>{ renderThread('dc-thread', (s.exists()&&s.data().thread)||[], {type:'daily', uid, ds}); }, e=>{});
+    _dcUnsub=onSnapshot(ref, s=>{ renderThread('dc-thread', (s.exists()&&s.data().thread)||[], {type:'daily', uid, ds}); }, e=>{ console.error('[WB] daily thread',e); const b=$('dc-thread'); if(b) b.innerHTML='<div class="empty2">대화를 불러오지 못했어요. 새로고침 해보세요.</div>'; });
     setTimeout(()=>{ const r=$('dc-reply'); if(r)r.focus(); },60);
   };
   window.sendDailyMsg=async(uid)=>{
     const inp=$('dc-reply'); const text=(inp?.value||'').trim(); if(!text) return;
-    const ref=doc(db,"daily",`${uid}_${today()}`); let cur=[]; try{ const s=await getDoc(ref); cur=(s.exists()&&s.data().thread)||[]; }catch(e){}
-    cur.push({by:currentUser.uid, byName:(userProfile&&userProfile.displayName)||'', role:userRole||'staff', text, at:Timestamp.now()});
-    try{ await setDoc(ref,{thread:cur, lastMsgAt:Timestamp.now()},{merge:true}); }catch(e){ alert(fbErr(e)+'\n(대화가 저장되지 않으면 Firestore 규칙에 daily의 thread 필드 쓰기 허용이 필요할 수 있어요.)'); return; }
+    const ref=doc(db,"daily",`${uid}_${today()}`);
+    const m={by:currentUser.uid, byName:(userProfile&&userProfile.displayName)||'', role:userRole||'staff', text, at:Timestamp.now()};
+    try{ await setDoc(ref,{uid,date:today(),thread:arrayUnion(m), lastMsgAt:Timestamp.now()},{merge:true}); }catch(e){ alert(fbErr(e)+'\n(대화가 저장되지 않으면 Firestore 규칙에 daily의 thread 필드 쓰기 허용이 필요할 수 있어요.)'); return; }
     if(inp){ inp.value=''; inp.focus(); }
   };
   window.closeDailyChat=()=>{ if(_dcUnsub){try{_dcUnsub();}catch(e){} _dcUnsub=null;} closeModal(); };
@@ -746,7 +746,7 @@
     for(let i=0;i<7;i++){ const dd=new Date(wsDate); dd.setDate(dd.getDate()+i); days.push(ymd(dd)); }
     if(!ds || !days.includes(ds)) ds = days.includes(today()) ? today() : days[0];
     const dateOpts=days.map((d,i)=>{ const dd=new Date(d+'T00:00:00'); return `<option value="${d}" ${d===ds?'selected':''}>${DAYS[i]} ${dd.getMonth()+1}/${dd.getDate()}</option>`; }).join('');
-    startT=startT||'09:00'; endT=endT||'09:30';
+    const _ws=(wbProfile&&wbProfile.workStart)||DEFAULT_START; startT=startT||_ws; { const sm=toMin(startT); endT=endT||(sm!=null?minHM(sm+30):'09:30'); }
     showModal(`<div class="modal-title">새 업무 추가</div>
       <div class="form-group"><label>업무 내용</label><input id="nb-title" class="mini-input" style="width:100%" placeholder="무엇을 할까요?"></div>
       <div class="row" style="gap:6px"><div class="form-group" style="flex:1.2"><label>날짜(요일)</label><select id="nb-date" class="mini-input" style="width:100%">${dateOpts}</select></div><div class="form-group" style="flex:1"><label>시작</label><input id="nb-start" type="time" step="1800" class="mini-input" style="width:100%" value="${startT}"></div><div class="form-group" style="flex:1"><label>종료</label><input id="nb-end" type="time" step="1800" class="mini-input" style="width:100%" value="${endT}"></div></div>
@@ -790,7 +790,7 @@
     document.querySelectorAll('.modal-seg .seg').forEach(bt=>{ if(bt.dataset.s===sel) bt.classList.add('on','seg-'+sel); bt.addEventListener('click',()=>{ sel=bt.dataset.s; window.__bdStatus=sel; document.querySelectorAll('.modal-seg .seg').forEach(x=>x.className='seg'); bt.classList.add('on','seg-'+sel); }); });
     if(_threadUnsub){try{_threadUnsub();}catch(e){}}
     _threadSlotId=slotId;
-    _threadUnsub=onSnapshot(ref, s=>{ renderThread('bd-thread', (s.exists()&&s.data().comments)||[]); }, e=>{});
+    _threadUnsub=onSnapshot(ref, s=>{ renderThread('bd-thread', (s.exists()&&s.data().comments)||[]); }, e=>{ console.error('[WB] block thread',e); const b=$('bd-thread'); if(b) b.innerHTML='<div class="empty2">대화를 불러오지 못했어요. 새로고침 해보세요.</div>'; });
   };
   function renderThread(boxId, comments, ctx){
     const box=$(boxId); if(!box) return;
@@ -805,9 +805,10 @@
   }
   window.sendBlockMsg = async (slotId)=>{
     const inp=$('bd-reply'); const text=(inp?.value||'').trim(); if(!text) return;
-    const ref=doc(db,"slots",slotId); const snap=await getDoc(ref); const cur=(snap.exists()&&snap.data().comments)||[];
-    cur.push({by:currentUser.uid, byName:(userProfile&&userProfile.displayName)||'', role:userRole||'staff', text, at:Timestamp.now()});
-    try{ await setDoc(ref,{comments:cur, lastMsgAt:Timestamp.now()},{merge:true}); }
+    const ref=doc(db,"slots",slotId);
+    const c={by:currentUser.uid, byName:(userProfile&&userProfile.displayName)||'', role:userRole||'staff', text, at:Timestamp.now()};
+    // arrayUnion = 원자적 추가 → 관리자·직원 동시 작성해도 서로 안 지움(lost update 방지)
+    try{ await setDoc(ref,{comments:arrayUnion(c), lastMsgAt:Timestamp.now()},{merge:true}); }
     catch(e){ alert(fbErr(e)+'\n(메시지가 저장되지 않으면 Firestore 규칙에서 slots의 comments 쓰기 허용이 필요할 수 있어요.)'); return; }
     if(inp){ inp.value=''; inp.focus(); }
   };
@@ -1003,9 +1004,9 @@
   function refreshOrderViews(uid,ds){ if($('order-new')) renderOrderManager(uid, window.__omName||''); else if(wbTab==='comments') renderCommentsTab(wbUid||currentUser.uid); }
   window.addOrder = async (uid)=>{
     const inp=$('order-new'); const text=(inp?.value||'').trim(); if(!text){ alert('지시 내용을 입력하세요'); return; }
-    const ref=doc(db,"daily",`${uid}_${today()}`); let arr=[]; try{ const s=await getDoc(ref); arr=((s.exists()&&s.data().orders)||[]).slice(); }catch(e){}
-    arr.push({id:newKey(), text, at:Timestamp.now(), by:currentUser.uid, byName:(userProfile&&userProfile.displayName)||'관리자'});
-    try{ await setDoc(ref,{orders:arr, lastMsgAt:Timestamp.now()},{merge:true}); }catch(e){ alert(fbErr(e)); return; }
+    const ref=doc(db,"daily",`${uid}_${today()}`);
+    const o={id:newKey(), text, at:Timestamp.now(), by:currentUser.uid, byName:(userProfile&&userProfile.displayName)||'관리자'};
+    try{ await setDoc(ref,{uid,date:today(),orders:arrayUnion(o), lastMsgAt:Timestamp.now()},{merge:true}); }catch(e){ alert(fbErr(e)); return; }
     if(inp) inp.value=''; renderOrderManager(uid, window.__omName||'');
   };
   window.orderEdit = async (uid,ds,id)=>{
@@ -1173,7 +1174,7 @@
     // 값이 실제로 바뀐 경우에만 쓰기(불필요한 실시간 재렌더/루프 방지)
     const prev=(wbCache&&wbCache.daily&&wbCache.daily.topGoals)||[];
     if(JSON.stringify(prev)!==JSON.stringify(goals)){
-      try{ await setDoc(doc(db,"daily",`${uid}_${today()}`),{uid,date:today(),topGoals:goals,updatedAt:Timestamp.now()},{merge:true}); }catch(e){}
+      try{ await setDoc(doc(db,"daily",`${uid}_${today()}`),{uid,date:today(),topGoals:goals,updatedAt:Timestamp.now()},{merge:true}); }catch(e){ console.error('[WB] syncGoals',e); }
     }
     updateMissCheck();
   }
@@ -1273,7 +1274,7 @@
     const title=$('d-title').value.trim(); if(!title){ alert('제목을 입력하세요'); return; }
     const links=[...document.querySelectorAll('#s-links .link-edit')].map(r=>({label:r.querySelector('.link-label').value.trim(),url:r.querySelector('.link-url').value.trim()})).filter(l=>isValidUrl(l.url));
     const subtasks=[...document.querySelectorAll('#d-subs .link-edit')].map(r=>({text:r.querySelector('.sub-text').value.trim(),done:r.querySelector('.sub-done').checked})).filter(s=>s.text);
-    const payload={ title, category:$('d-cat')?.value||'', subtasks, plannedTime:$('d-time').value||'', memo:$('d-memo').value.trim(), links, needsHelp:$('d-help').checked, helpNote:$('d-helpnote').value.trim(), updatedAt:Timestamp.now() };
+    const payload={ title, category:$('d-cat')?.value||'', subtasks, plannedTime:$('d-time').value||'', memo:$('d-memo').value.trim(), links, needsHelp:$('d-help').checked, helpResolved:$('d-help').checked?false:(t.helpResolved||false), helpNote:$('d-helpnote').value.trim(), updatedAt:Timestamp.now() };
     Object.assign(t,payload);
     await setDoc(doc(db,"slots",id), payload, {merge:true});
     renderTaskList(uid); closeModal();
@@ -1535,7 +1536,7 @@
       const cur=new Set(((snap.exists()?snap.data().routinesDone:[])||[])); const has=cur.has(routineId);
       if(isDone&&!has)cur.add(routineId); else if(!isDone&&has)cur.delete(routineId); else return;
       await setDoc(ref,{uid,date:today(),routinesDone:[...cur],updatedAt:Timestamp.now()},{merge:true});
-    }catch(e){}
+    }catch(e){ console.error('[WB] mirrorRoutineDone',e); showToast('완료 상태 동기화에 실패했어요. 새로고침 해보세요.'); }
   }
 
   // ── 주간 타임테이블(보조) ──
@@ -1579,7 +1580,7 @@
       $('slot-save').onclick=async()=>{ const title=$('s-title').value.trim(); if(!title){alert('업무 내용을 입력하세요');return;}
         const links=[...document.querySelectorAll('#s-links .link-edit')].map(r=>({label:r.querySelector('.link-label').value.trim(),url:r.querySelector('.link-url').value.trim()})).filter(l=>isValidUrl(l.url));
         const payload={uid,date,hour,plannedTime:hour,title,status:selStatus,memo:$('s-memo').value.trim(),links,weekStart:weekStart(new Date(date)),updatedAt:Timestamp.now()};
-        if($('s-help')){ payload.needsHelp=$('s-help').checked; payload.helpNote=$('s-help-note').value.trim(); }
+        if($('s-help')){ payload.needsHelp=$('s-help').checked; payload.helpResolved=$('s-help').checked?false:(d.helpResolved||false); payload.helpNote=$('s-help-note').value.trim(); }
         if($('s-comment')) payload.bossComment=$('s-comment').value.trim();
         await setDoc(doc(db,"slots",slotId),payload,{merge:true});
         renderCellContent(cellEl,payload); closeModal();
