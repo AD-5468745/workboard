@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- WorkBoard build 2026-07-05g (효율: 오늘 집중 지금/다음 배너·진행률바·블록 원클릭 완료 + f:지시여러건·대화모니터) -->
+<!-- WorkBoard build 2026-07-05aa (오늘진행중 깜빡임 근본수정: 목록만 원자갱신+경쟁토큰 / 필수업무 오늘+앞으로 자동생성 · 요일지정(매일·특정요일)) -->
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
@@ -294,6 +294,10 @@
   let wbBiz=''; try{ wbBiz=localStorage.getItem('wbBiz')||''; }catch(e){}  // ''=통합
   async function loadBusinesses(){ try{ const s=await getDocs(collection(db,"businesses")); businesses=[]; s.forEach(d=>businesses.push({id:d.id,...d.data()})); businesses.sort((a,b)=>(a.order||0)-(b.order||0)); }catch(e){ console.error('[WB] loadBusinesses',e); businesses=[]; } }
   const bizMatch=(item)=> !wbBiz || (item&&item.biz)===wbBiz;   // 통합이면 모두, 특정 사업이면 그 사업만
+  // 필수업무 요일 필터: days 비었으면 매일, 있으면 그 요일에만. days는 getDay()값(0=일..6=토) 배열.
+  const dayMatch=(r,dateStr)=>{ const ds=(r&&Array.isArray(r.days))?r.days:[]; if(!ds.length) return true; try{ return ds.includes(new Date(dateStr+'T00:00:00').getDay()); }catch(e){ return true; } };
+  const DOW_LABEL=["일","월","화","수","목","금","토"];   // getDay() 인덱스용
+  const daysText=(r)=>{ const ds=(r&&Array.isArray(r.days))?r.days:[]; if(!ds.length||ds.length===7) return "매일"; const order=[1,2,3,4,5,6,0]; return order.filter(d=>ds.includes(d)).map(d=>DOW_LABEL[d]).join("·"); };
   const bizName=(id)=>{ const b=businesses.find(x=>x.id===id); return b?b.name:''; };
   function renderBizBar(){
     const bar=$('biz-bar'); if(!bar) return;
@@ -363,7 +367,7 @@
     const uid=wbUid||currentUser.uid; const p=$('wb-panel'); if(!p) return;
     if(wbTab==='cal') renderCalendar(uid);
     else if(wbTab==='fixed'){ p.innerHTML='<div class="link-conn">🔗 여기 체크는 <b>캘린더·오늘 진행중</b>과 연동됩니다.</div><div id="routines-box"></div>'; loadRoutinesChecklist(uid,'routines-box',today()); }
-    else if(wbTab==='today') renderTodayTab(uid);
+    else if(wbTab==='today'){ if($('task-list')) loadTodayTasks(uid,today()); else renderTodayTab(uid); }  // 이미 패널이 있으면 목록만 갱신(패널 통째 재빌드 안 함 → 빈틈·깜빡임 없음)
     else if(wbTab==='plan') renderPlanTab(uid);
     else if(wbTab==='attend') renderAttendTab(uid);
     else if(wbTab==='comments') renderCommentsTab(uid);
@@ -411,7 +415,7 @@
     const open=slots.filter(s=>(s.status||'todo')!=='done'&&s.title).length;
     const set=(id,v)=>{ const e=$(id); if(e) e.textContent=v||''; };
     set('cnt-today',open);
-    const routines=(wbCache.routines||[]).filter(r=>r.active!==false&&(r.targetUid==='all'||r.targetUid===uid)&&bizMatch(r));
+    const routines=(wbCache.routines||[]).filter(r=>r.active!==false&&(r.targetUid==='all'||r.targetUid===uid)&&bizMatch(r)&&dayMatch(r,today()));
     const rdone=new Set(((wbCache.daily&&wbCache.daily.routinesDone))||[]);
     set('cnt-fixed',routines.length?`${routines.filter(r=>rdone.has(r.id)).length}/${routines.length}`:'');
     const plan=(((wbCache.daily&&wbCache.daily.tomorrowTasks))||[]).filter(Boolean).length+open;
@@ -643,6 +647,7 @@
     if(isThis){ slots=(wbCache.slots||[]).slice(); }
     else { try{ const snap=await getDocs(query(collection(db,"slots"),where("uid","==",uid),where("weekStart","==",ws))); slots=[]; snap.forEach(d=>slots.push({id:d.id,...d.data()})); }
       catch(e){ console.error('[WB] 주 불러오기',e); slots=[]; showToast('이 주 일정을 불러오지 못했어요. 인터넷 확인 후 다시 시도해 주세요.'); } }
+    const allSlots=slots.slice();   // 필터 전 원본(자동생성 시 기존 slot 완료상태 보존용)
     slots=slots.filter(bizMatch);   // 선택된 사업만(통합이면 전체)
     const wsDate=new Date(ws+"T00:00:00"); const dayList=[];
     for(let i=0;i<7;i++){ const dd=new Date(wsDate); dd.setDate(dd.getDate()+i); dayList.push(ymd(dd)); }
@@ -655,6 +660,9 @@
     const dayView = wbCalView==='day';
     if(dayView && !wbDayDate) wbDayDate=tds;
     const cdays = dayView ? [wbDayDate] : dayList.slice();
+    // 시간 있는 필수업무를 '보이는 날짜 중 오늘~앞으로'에 자동 생성(과거는 건드리지 않음). 세션 가드로 1회만.
+    const visDays=cdays.filter(d=>d && d>=tds);
+    if(visDays.length){ try{ const wrote=await ensureRoutineSlots(uid, visDays, allSlots); if(wrote && !isThis) return renderCalendar(uid); }catch(e){ console.error('[WB] ensureRoutineSlots(cal)',e); } }
     const gridCols = dayView ? '56px 1fr' : '56px repeat(7,minmax(112px,1fr))';
     let cols='';
     cdays.forEach((ds2,i)=>{ const isT=ds2===tds; cols+=`<div class="day-col${isT?' today':''}" data-date="${ds2}" data-idx="${i}" style="height:${rows*CAL_ROWH}px"></div>`; });
@@ -1136,19 +1144,15 @@
   const catOptions = (sel) => '<option value="">미분류</option>'+categories.map(c=>`<option value="${c.id}" ${c.id===sel?'selected':''}>${esc(c.name)}</option>`).join('');
 
   // ── 오늘 할 일 로드/렌더 ──
+  let _todaySeq=0;
   async function loadTodayTasks(uid, dateStr){
-    // ✅ 실시간 캐시(wbCache.slots)에서 바로 그린다 — 매 이벤트마다 서버 재쿼리하며 '비웠다 채우기'(사라졌다 나타났다·느림) 안 함.
-    if(!categories.length){ try{ await loadCategories(); }catch(e){} }   // 주제는 최초 1회만
-    const isThisWeek = (wbWeekStart===weekStart());
-    if(isThisWeek){
-      todayTasks=(wbCache.slots||[]).filter(s=> (s.uid||uid)===uid && s.date===dateStr);
-      renderTaskList(uid);
-    } else {
-      // 이번 주가 아닐 때만(드묾) 조회 — 실시간 캐시가 다른 주를 볼 때
-      try{ const snap=await getDocs(query(collection(db,"slots"),where("uid","==",uid),where("date","==",dateStr)));
-        todayTasks=[]; snap.forEach(d=>todayTasks.push({id:d.id, ...d.data()})); }catch(e){ console.error('[WB] loadTodayTasks',e); }
-      renderTaskList(uid);
-    }
+    const seq=++_todaySeq;   // 경쟁 방지: 더 최신 요청이 오면 이 응답은 버림
+    let snap;
+    try{ [snap] = await Promise.all([ getDocs(query(collection(db,"slots"),where("uid","==",uid),where("date","==",dateStr))), loadCategories() ]); }
+    catch(e){ console.error('[WB] loadTodayTasks', e); return; }
+    if(seq!==_todaySeq) return;   // 그 사이 더 최신 요청이 있었으면 무시(오래된 결과로 덮어써 깜빡임 방지)
+    todayTasks=[]; snap.forEach(d=>todayTasks.push({id:d.id, ...d.data()}));
+    renderTaskList(uid);   // #task-list만 데이터 준비 후 한 번에 교체(빈 목록 노출 없음)
     // ⚠ 렌더 경로에서는 daily에 쓰지 않는다(실시간 리스너 재렌더 → 무한 깜빡임 방지).
   }
   function sortTasks(a,b){
@@ -1522,7 +1526,7 @@
     const box=$(containerId); if(!box) return;
     const canManage=(currentUser&&currentUser.uid===uid)||userRole==='boss';
     const [rSnap,dSnap]=await Promise.all([getDocs(collection(db,"routines")),getDoc(doc(db,"daily",`${uid}_${dateStr}`))]);
-    const routines=[]; rSnap.forEach(r=>{const d=r.data(); if(d.active!==false&&(d.targetUid==='all'||d.targetUid===uid)&&bizMatch(d)) routines.push({id:r.id,...d});});
+    const routines=[]; rSnap.forEach(r=>{const d=r.data(); if(d.active!==false&&(d.targetUid==='all'||d.targetUid===uid)&&bizMatch(d)&&dayMatch(d,dateStr)) routines.push({id:r.id,...d});});
     const done=new Set(((dSnap.exists()?dSnap.data().routinesDone:[])||[]));
     const manage=canManage?`<span class="link-btn" onclick="openRoutineManager('${uid}')">관리</span>`:'';
     if(!routines.length){ box.innerHTML=`<div class="soft-card"><div class="row-between"><span class="sec-title">필수 업무</span>${manage}</div><div class="muted" style="margin-top:6px">아직 등록된 필수 업무가 없어요.</div></div>`; return; }
@@ -1575,7 +1579,11 @@
       <input type="hidden" id="rt-editing" value="">
       <div class="form-group"><label>제목 (하나의 필수 업무)</label><input id="rt-title" class="mini-input" style="width:100%" placeholder="예: 전일 이용회원 검수"></div>
       <div class="row" style="gap:6px"><div class="form-group" style="flex:1"><label>시작 시간 (선택)</label><input id="rt-time" type="time" step="1800" class="mini-input" style="width:100%"></div><div class="form-group" style="flex:1"><label>종료 (선택)</label><input id="rt-end" type="time" step="1800" class="mini-input" style="width:100%"></div></div>
-      <div class="muted" style="margin:-4px 0 10px;font-size:11.5px">⏱ 시간을 비우면 지금처럼 체크리스트로만 쓰여요. 시간을 넣으면 매일 그 시각에 오늘 진행중·캘린더로 자동 등록됩니다.</div>
+      <div class="muted" style="margin:-4px 0 10px;font-size:11.5px">⏱ 시간을 비우면 지금처럼 체크리스트로만 쓰여요. 시간을 넣으면 그 시각에 오늘 진행중·캘린더로 자동 등록됩니다.</div>
+      <div class="form-group"><label>요일 (안 고르면 <b>매일</b>)</label>
+        <div id="rt-days" class="rt-dayrow">${[[1,'월'],[2,'화'],[3,'수'],[4,'목'],[5,'금'],[6,'토'],[0,'일']].map(([d,l])=>`<button type="button" class="rt-day" data-dow="${d}" onclick="this.classList.toggle('on')">${l}</button>`).join('')}</div>
+        <div class="muted" style="font-size:11.5px;margin-top:5px">예) 매주 금요일 → <b>금</b>만 · 화·금 → <b>화·금</b> · 아무것도 안 고르면 <b>매일</b></div>
+      </div>
       <div class="form-group"><label>프로젝트</label><select id="rt-biz" class="mini-input" style="width:100%">${bizOptions(wbBiz)}</select></div>
       <div class="form-group"><label>주제 (선택)</label><div class="row" style="gap:6px"><select id="rt-cat" class="mini-input" style="flex:1">${catOptions('')}</select><button type="button" class="btn btn-ghost" onclick="newCatInline('rt-cat')">＋ 새 주제</button></div></div>
       ${boss?`<div class="form-group"><label>대상</label><select id="rt-target" class="mini-input" style="width:100%">${targetOpts}</select></div>`:`<input type="hidden" id="rt-target" value="${currentUser.uid}">`}
@@ -1583,7 +1591,7 @@
       <div style="text-align:right" id="rt-actions"><button class="btn btn-primary" id="rt-savebtn" onclick="saveRoutine('${uid}')">＋ 추가</button></div>
       <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:12px">
         <div class="muted" style="margin-bottom:6px">등록됨 (${list.length})</div>
-        ${list.length?list.map(r=>`<div class="row-between" style="padding:6px 0;border-bottom:1px solid var(--border)"><span><span class="grp-dot" style="background:${catColor(r.category)}"></span> ${esc(r.title)}${r.time?` <span class="pill" style="background:#eef2ff;color:#3538cd;padding:1px 7px;border-radius:10px;font-size:11px">⏱ ${esc(r.time)}${r.endTime?'–'+esc(r.endTime):''}</span>`:''} <span class="muted">· ${esc(catName(r.category))} · ${esc(nameOf(r.targetUid))}</span></span><span style="white-space:nowrap"><button class="btn btn-ghost" onclick="routineEdit('${r.id}','${uid}')">수정</button> <button class="btn btn-danger" onclick="deleteRoutine('${r.id}','${uid}')">삭제</button></span></div>`).join(''):'<div class="muted">아직 없음</div>'}
+        ${list.length?list.map(r=>`<div class="row-between" style="padding:6px 0;border-bottom:1px solid var(--border)"><span><span class="grp-dot" style="background:${catColor(r.category)}"></span> ${esc(r.title)}${r.time?` <span class="pill" style="background:#eef2ff;color:#3538cd;padding:1px 7px;border-radius:10px;font-size:11px">⏱ ${esc(r.time)}${r.endTime?'–'+esc(r.endTime):''}</span>`:''} <span class="pill" style="background:#eef7f0;color:#0d7a4f;padding:1px 7px;border-radius:10px;font-size:11px">📅 ${esc(daysText(r))}</span> <span class="muted">· ${esc(catName(r.category))} · ${esc(nameOf(r.targetUid))}</span></span><span style="white-space:nowrap"><button class="btn btn-ghost" onclick="routineEdit('${r.id}','${uid}')">수정</button> <button class="btn btn-danger" onclick="deleteRoutine('${r.id}','${uid}')">삭제</button></span></div>`).join(''):'<div class="muted">아직 없음</div>'}
       </div>
       <div class="modal-footer"><button class="btn btn-ghost" onclick="closeModal()">닫기</button></div>`);
     if(editRid) window.routineEdit(editRid, uid);   // 체크리스트에서 항목 바로 클릭 → 수정 모드로 열림
@@ -1593,6 +1601,7 @@
     const set=(id,v)=>{ const e=$(id); if(e) e.value=(v==null?'':v); };
     set('rt-editing',rid); set('rt-title',r.title||''); set('rt-time',r.time||''); set('rt-end',r.endTime||'');
     set('rt-biz',r.biz||''); set('rt-cat',r.category||''); set('rt-guide',r.guide||'');
+    const dset=new Set(Array.isArray(r.days)?r.days:[]); document.querySelectorAll('#rt-days .rt-day').forEach(b=>b.classList.toggle('on', dset.has(+b.dataset.dow)));
     if($('rt-target')) $('rt-target').value=r.targetUid||'all';
     const btn=$('rt-savebtn'); if(btn) btn.textContent='저장';
     const act=$('rt-actions'); if(act && !$('rt-cancel')){ const c=document.createElement('button'); c.className='btn btn-ghost'; c.id='rt-cancel'; c.textContent='편집 취소'; c.style.marginRight='6px'; c.onclick=()=>window.routineCancelEdit(); act.insertBefore(c,act.firstChild); }
@@ -1600,6 +1609,7 @@
   };
   window.routineCancelEdit = () => {
     ['rt-editing','rt-title','rt-time','rt-end','rt-guide'].forEach(id=>{ const e=$(id); if(e)e.value=''; });
+    document.querySelectorAll('#rt-days .rt-day').forEach(b=>b.classList.remove('on'));
     const btn=$('rt-savebtn'); if(btn) btn.textContent='＋ 추가';
     const c=$('rt-cancel'); if(c) c.remove();
   };
@@ -1608,49 +1618,62 @@
     const tgt=(userRole==='boss')?($('rt-target')?.value||'all'):currentUser.uid; const guide=$('rt-guide')?.value.trim()||''; const category=$('rt-cat')?.value||''; const biz=$('rt-biz')?.value||wbBiz||'';
     const time=$('rt-time')?.value||''; const endTime=$('rt-end')?.value||'';
     if(time&&endTime&&endTime<=time){ alert('종료가 시작보다 늦어야 합니다'); return; }
+    let days=[...document.querySelectorAll('#rt-days .rt-day.on')].map(b=>+b.dataset.dow).filter(d=>!isNaN(d));
+    if(days.length===7) days=[];   // 전부 선택 = 매일(빈 배열로 저장)
     const editing=$('rt-editing')?.value||'';
     try{
       if(editing){
-        await setDoc(doc(db,"routines",editing),{title,guide,category,biz,targetUid:tgt,time,endTime,updatedAt:Timestamp.now()},{merge:true});
+        await setDoc(doc(db,"routines",editing),{title,guide,category,biz,targetUid:tgt,time,endTime,days,updatedAt:Timestamp.now()},{merge:true});
       }else{
-        await addDoc(collection(db,"routines"),{title,guide,category,biz,targetUid:tgt,time,endTime,createdBy:currentUser.uid,active:true,createdAt:Timestamp.now()});
+        await addDoc(collection(db,"routines"),{title,guide,category,biz,targetUid:tgt,time,endTime,days,createdBy:currentUser.uid,active:true,createdAt:Timestamp.now()});
       }
     }catch(e){ alert(fbErr(e)); return; }
     openRoutineManager(uid); if($('routines-box')) loadRoutinesChecklist(uid,'routines-box',today());
   };
   window.deleteRoutine = async (rid, uid) => { if(!confirm('삭제할까요?')) return; await deleteDoc(doc(db,"routines",rid)); openRoutineManager(uid); if($('routines-box')) loadRoutinesChecklist(uid,'routines-box',today()); };
 
-  // ── 시간 있는 필수업무 → 오늘 진행중·캘린더 자동 등록 ──
+  // ── 시간 있는 필수업무 → 오늘·앞으로의 날짜에 자동 등록(오늘진행중·캘린더) ──
   let _rtEnsuring=false; const _rtDone=new Set();   // 세션당 처리 완료한 (날짜_uid_루틴) — 무한 재쓰기(깜빡임) 방지
-  async function ensureRoutineSlots(uid, dateStr){
-    if(_rtEnsuring || !uid) return;   // 보고 있는 계정(wbUid)에 대해 생성 — 관리자가 직원 화면을 봐도 그 직원 루틴이 캘린더에 뜨게
+  // dates: 하나(문자열) 또는 여러 날짜(배열). existing: 완료상태 보존용 기존 slot 목록(없으면 현재 캐시).
+  // 반환: 새로 쓴 게 있으면 true(호출측이 다른 주 재렌더 판단에 사용).
+  async function ensureRoutineSlots(uid, dates, existing){
+    if(_rtEnsuring || !uid) return false;   // 보고 있는 계정(wbUid)에 대해 생성 — 관리자가 직원 화면을 봐도 그 직원 루틴이 캘린더에 뜨게
+    const dateArr=(Array.isArray(dates)?dates:[dates]).filter(Boolean);
+    if(!dateArr.length) return false;
     const routines=(wbCache.routines||[]).filter(r=>r.active!==false && r.time && (r.targetUid==='all'||r.targetUid===uid));
-    if(!routines.length) return;
-    const skipped=new Set(((wbCache.daily&&wbCache.daily.routineSlotsSkipped)||[]));
-    const byId=new Map((wbCache.slots||[]).filter(s=>s.date===dateStr).map(s=>[s.id,s]));
+    if(!routines.length) return false;
+    const skipped=new Set(((wbCache.daily&&wbCache.daily.routineSlotsSkipped)||[]));   // '다시 안 뜨게'는 오늘 daily 기준
+    const src=(existing&&existing.length!=null)?existing:(wbCache.slots||[]);           // 완료상태 보존: 기존 slot 참조
+    const tds=today();
     const ops=[];   // [key, id, data]
-    routines.forEach(r=>{
-      const key=dateStr+'_'+uid+'_'+r.id;
-      if(_rtDone.has(key)) return;                 // 이미 이 세션에서 처리함 → 다시 안 씀(핵심: 캐시에 반영이 안 돼도 재쓰기 루프 없음)
-      if(skipped.has(r.id)){ _rtDone.add(key); return; }
-      const id=`${uid}_${dateStr}_rt_${r.id}`;
-      const cur=byId.get(id);
-      if(!cur){
-        let en=r.endTime||''; if(!en){ const m=toMin(r.time); if(m!=null) en=minHM(Math.min(m+30,23*60+59)); }
-        ops.push([key, id, { uid, date:dateStr, title:r.title||'필수 업무', guide:r.guide||'', biz:r.biz||'', category:r.category||'', status:'todo', important:false, startTime:r.time||'', endTime:en, plannedTime:r.time||'', weekStart:weekStart(new Date(dateStr+'T00:00:00')), fromRoutine:r.id, updatedAt:Timestamp.now() }]);
-      } else if((cur.guide||'')!==(r.guide||'')){
-        ops.push([key, id, { guide:r.guide||'', updatedAt:Timestamp.now() }]);   // 오늘 이미 생긴 업무에 작업내용 채워넣기(backfill)
-      } else {
-        _rtDone.add(key);   // 이미 맞음 → 쓰기 없이 완료 표시
-      }
-    });
-    if(!ops.length) return;
+    for(const dateStr of dateArr){
+      if(dateStr < tds) continue;   // 과거 날짜엔 생성하지 않음(오늘+앞으로 — 가짜 미완료 기록 방지)
+      const byId=new Map(src.filter(s=>s.date===dateStr).map(s=>[s.id,s]));
+      routines.forEach(r=>{
+        if(!dayMatch(r,dateStr)) return;             // 요일 지정 필수업무는 해당 요일에만
+        const key=dateStr+'_'+uid+'_'+r.id;
+        if(_rtDone.has(key)) return;                 // 이미 이 세션에서 처리함 → 다시 안 씀(재쓰기 루프 없음)
+        if(dateStr===tds && skipped.has(r.id)){ _rtDone.add(key); return; }   // 오늘만 '다시 안 뜨게' 적용
+        const id=`${uid}_${dateStr}_rt_${r.id}`;
+        const cur=byId.get(id);
+        if(!cur){
+          let en=r.endTime||''; if(!en){ const m=toMin(r.time); if(m!=null) en=minHM(Math.min(m+30,23*60+59)); }
+          ops.push([key, id, { uid, date:dateStr, title:r.title||'필수 업무', guide:r.guide||'', biz:r.biz||'', category:r.category||'', status:'todo', important:false, startTime:r.time||'', endTime:en, plannedTime:r.time||'', weekStart:weekStart(new Date(dateStr+'T00:00:00')), fromRoutine:r.id, updatedAt:Timestamp.now() }]);
+        } else if((cur.guide||'')!==(r.guide||'')){
+          ops.push([key, id, { guide:r.guide||'', updatedAt:Timestamp.now() }]);   // 이미 생긴 업무에 작업내용 채워넣기(backfill) — status는 건드리지 않음(완료 보존)
+        } else {
+          _rtDone.add(key);   // 이미 맞음 → 쓰기 없이 완료 표시
+        }
+      });
+    }
+    if(!ops.length) return false;
     _rtEnsuring=true;
     try{
       for(const [key,id,data] of ops){
         try{ await setDoc(doc(db,"slots",id), data, {merge:true}); _rtDone.add(key); }catch(e){ console.error('[WB] ensureRoutineSlots',e); }
       }
     } finally { _rtEnsuring=false; }
+    return true;
   }
   // 필수업무(자동 생성 업무)의 완료 상태를 체크리스트(daily.routinesDone)에 미러
   async function mirrorRoutineDone(routineId, uid, isDone){
@@ -2134,6 +2157,10 @@ body{font-family:-apple-system,'Malgun Gothic','맑은 고딕',sans-serif;backgr
 .rt-title{font-size:13.5px;font-weight:600;color:var(--text);}
 .rt-edit{font-size:11px;color:var(--text-3);opacity:0;margin-left:2px;}
 .rt-title:hover .rt-edit{opacity:1;}
+.rt-dayrow{display:flex;gap:6px;flex-wrap:wrap;}
+.rt-day{width:36px;height:34px;border-radius:8px;border:1.4px solid var(--border);background:var(--surface-2);color:var(--text-2);font-size:13px;font-weight:700;cursor:pointer;transition:all .12s;}
+.rt-day:hover{border-color:var(--accent);}
+.rt-day.on{background:var(--accent);border-color:var(--accent);color:#fff;}
 .rt-title:hover{color:var(--accent);}
 .rt-title.done{color:var(--text-3);text-decoration:line-through;}
 .rt-guide{margin-top:6px;background:var(--accent-bg);border:1px solid #cdd7f7;border-radius:8px;padding:8px 10px;font-size:12px;color:var(--accent-text);line-height:1.7;white-space:pre-wrap;}
