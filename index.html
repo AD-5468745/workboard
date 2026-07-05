@@ -89,6 +89,9 @@
   const $ = id => document.getElementById(id);
   const el = (tag,cls,html='') => { const e=document.createElement(tag); if(cls)e.className=cls; if(html)e.innerHTML=html; return e; };
   const esc = s => (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  // 인라인 onclick="fn('...')" 안에 넣는 값 전용: HTML 속성 + JS 문자열 이중 컨텍스트 안전화
+  // (HTML 엔티티는 속성에서 디코딩돼 JS 문자열을 못 막으므로, 백슬래시로 JS 이스케이프)
+  const escAttr = s => (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
   const isValidUrl = u => /^https?:\/\/\S+$/i.test((u||'').trim());
   const newKey = () => Date.now().toString(36)+Math.random().toString(36).slice(2,6);
   // 관리자 지시 목록 정규화(구 단일 bossComment + 신 orders[] 모두 지원)
@@ -1643,12 +1646,12 @@
       <div class="page-header">
         <div class="row" style="gap:12px"><div class="staff-header-avatar" style="background:${s.color||'#4f6bed'}">${(s.displayName||'?')[0]}</div><div><div class="page-title">${s.displayName||s.email}</div><div class="page-sub" id="staff-meta">${esc(s.email||'')}</div></div></div>
         <div class="row" style="gap:8px;flex-wrap:wrap">
-          <button class="btn btn-ghost" onclick="openAddTaskModal('${s.uid}','${esc(s.displayName||s.email)}')">＋ 업무 배정</button>
+          <button class="btn btn-ghost" onclick="openAddTaskModal('${s.uid}','${escAttr(s.displayName||s.email)}')">＋ 업무 배정</button>
           <button class="btn btn-ghost" onclick="openCategoryManager('${s.uid}')">주제 관리</button>
           <button class="btn btn-ghost" onclick="openRoutineManager('${s.uid}')">필수 업무</button>
-          <button class="btn btn-primary" onclick="openBossCommentModal('${s.uid}','${esc(s.displayName||s.email)}')">📣 지시 보내기</button>
+          <button class="btn btn-primary" onclick="openBossCommentModal('${s.uid}','${escAttr(s.displayName||s.email)}')">📣 지시 보내기</button>
           <button class="btn btn-ghost" onclick="bossShowHistory('${s.uid}')">지난 기록</button>
-          <button class="btn btn-ghost" onclick="openStaffAccount('${s.uid}','${esc(s.displayName||s.email)}',${s.active!==false})">계정 관리</button>
+          <button class="btn btn-ghost" onclick="openStaffAccount('${s.uid}','${escAttr(s.displayName||s.email)}',${s.active!==false})">계정 관리</button>
         </div>
       </div>
       <div id="boss-history-wrap"></div>
