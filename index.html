@@ -491,8 +491,8 @@
     seq.forEach(([f,dt])=>{ const o=_audioCtx.createOscillator(), g=_audioCtx.createGain(); o.type='square'; o.frequency.value=f; o.connect(g); g.connect(_audioCtx.destination); const t=t0+dt; g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.26,t+0.02); g.gain.exponentialRampToValueAtTime(0.0001,t+0.18); o.start(t); o.stop(t+0.2); });
   }catch(e){} };
   // 오늘 내 스케줄의 시작 시각이 되면 알람
-  let _schedTimer=null, _startAlerted=new Set(), _endAlerted=new Set(), _watchDay=null;
-  function startScheduleWatch(){ if(_schedTimer) clearInterval(_schedTimer); _startAlerted=new Set(); _endAlerted=new Set(); _watchDay=today();
+  let _schedTimer=null, _startAlerted=new Set(), _startDismissed=new Set(), _endAlerted=new Set(), _watchDay=null;
+  function startScheduleWatch(){ if(_schedTimer) clearInterval(_schedTimer); _startAlerted=new Set(); _startDismissed=new Set(); _endAlerted=new Set(); _watchDay=today();
     _schedTimer=setInterval(()=>{
       if(today()!==_watchDay){ // 자정 넘어 날짜 바뀜 → 리스너·이월 재시작(어제 화면에 오늘 쓰기 방지)
         _watchDay=today();
@@ -507,21 +507,25 @@
       if(!currentUser) return; const uid=wbUid||currentUser.uid; if(uid!==currentUser.uid) return;   // 내 스케줄만 알람
       const nowMin=toMin(nowHM()); if(nowMin==null) return; const t=today();
       (wbCache.slots||[]).forEach(s=>{
-        if(s.date!==t || (s.status||'todo')==='done' || !bizMatch(s)) return;
+        if(s.date!==t || (s.status||'todo')!=='todo' || !bizMatch(s)) return;   // 아직 시작 안 한(미완료) 업무만
         const sm=slotStartMin(s); if(sm==null) return;
-        const key=s.id+'@'+t; if(_startAlerted.has(key)) return;
-        if(nowMin>=sm && nowMin<=sm+1){ _startAlerted.add(key); fireStartAlarm(s); }
+        const key=s.id+'@'+t; if(_startDismissed.has(key)) return;              // '확인' 누른 건 중지
+        if(nowMin>=sm-5 && nowMin<=sm+120){ fireStartAlarm(s, sm-nowMin, key); }   // 시작 5분 전부터, 확인 전까지 매 틱 반복
       });
     }catch(e){}
   }
-  function fireStartAlarm(s){
+  window.dismissStartAlarm = (key)=>{ _startDismissed.add(key); };
+  function fireStartAlarm(s, remain, key){
     alarmBeep();
-    showToast(`⏰ 지금 시작할 시간! ${s.title||'업무'} (${minHM(slotStartMin(s))}~)`);
-    _notifList = _notifList.filter(it=>it.key!=='start:'+s.id+'@'+today());
-    _notifList.unshift({key:'start:'+s.id+'@'+today(), kind:'start', task:'⏰ 시작 시간', who:'스케줄', text:`'${s.title||'업무'}' 시작 시간이에요`, at:Math.floor(Date.now()/1000), uid:s.uid||wbUid||currentUser.uid, slotId:s.id});
-    if(_notifList.length>30)_notifList.pop(); _notifUnread++; renderNotifBell();
-    if(_notifOpen){ const p=$('notif-panel'); if(p)p.innerHTML=notifPanelHTML(); }
-    if(typeof Notification!=='undefined' && Notification.permission==='granted' && localStorage.getItem('wbNotifBrowser')==='1'){ try{ new Notification('⏰ 업무 시작 시간', {body:`'${s.title||'업무'}' 시작할 시간이에요 (${minHM(slotStartMin(s))})`}); }catch(e){} }
+    const msg = remain>0 ? `⏰ 곧 시작: ${s.title||'업무'} · ${remain}분 뒤(${minHM(slotStartMin(s))})` : `⏰ 시작할 시간: ${s.title||'업무'} (${minHM(slotStartMin(s))})`;
+    showToast(msg, '확인', ()=>dismissStartAlarm(key));   // 확인 누르기 전까지 매번 다시 울림
+    if(!_startAlerted.has(key)){   // 알림함 항목은 1회만
+      _startAlerted.add(key);
+      _notifList.unshift({key:'start:'+key, kind:'start', task:'⏰ 시작 예정', who:'스케줄', text:`'${s.title||'업무'}' 곧 시작(${minHM(slotStartMin(s))})`, at:Math.floor(Date.now()/1000), uid:s.uid||wbUid||currentUser.uid, slotId:s.id});
+      if(_notifList.length>30)_notifList.pop(); _notifUnread++; renderNotifBell();
+      if(_notifOpen){ const p=$('notif-panel'); if(p)p.innerHTML=notifPanelHTML(); }
+      if(typeof Notification!=='undefined' && Notification.permission==='granted' && localStorage.getItem('wbNotifBrowser')==='1'){ try{ new Notification('⏰ 곧 시작', {body:`'${s.title||'업무'}' 곧 시작(${minHM(slotStartMin(s))})`}); }catch(e){} }
+    }
   }
   // 오늘 내 업무의 '종료 10분 전' → 곧 종료 알림 + 지연 밀기 결정
   function checkScheduleEnd(){
@@ -1200,6 +1204,17 @@
           <div class="miss-note">${disp==='blocked'?'진행불가 — 내일로 이월되지 않아요.':'내일 <b>오늘 진행중</b>으로 사유와 함께 넘어가요.'}</div>
         </div>`;
       }
+    } else if(st==='done'){
+      const note=(t.doneNote||'').trim();
+      const open=expandedMiss.has(t.id)||!!note;
+      if(!open){
+        missBox=`<div class="miss-line"><span class="miss-toggle" onclick="toggleMiss('${uid}','${t.id}')">＋ 성과 기록</span></div>`;
+      } else {
+        missBox=`<div class="miss-panel">
+          <div style="font-size:12px;color:var(--text-2);margin-bottom:6px">성과 · 어떻게 진행했고 얼마나 달성했나요?</div>
+          <input class="miss-reason" id="done_${t.id}" placeholder="예: 목표 100건 중 120건 완료 · 이슈 없음 (선택)" value="${escAttr(note)}" onkeydown="if(event.key==='Enter')this.blur()" onblur="saveDoneNote('${uid}','${t.id}',this.value)">
+        </div>`;
+      }
     }
     const subLine = subs.length?`<span class="subline" onclick="toggleSub('${uid}','${t.id}')">🗂 하위 ${subDone}/${subs.length} ${expanded?'▾':'▸'}</span>`:'';
     let subBox='';
@@ -1230,7 +1245,7 @@
   };
   window.setTaskStatus = async (uid, id, status) => {
     const t=todayTasks.find(x=>x.id===id); if(!t) return;
-    t.status=status; if(status==='todo') expandedMiss.add(id); else expandedMiss.delete(id);   // 미완료 고르면 처리 패널 펼침
+    t.status=status; if(status==='todo'||status==='done') expandedMiss.add(id); else expandedMiss.delete(id);   // 미완료→처리, 완료→성과 패널 펼침
     renderTaskList(uid);
     await setDoc(doc(db,"slots",id),{status,updatedAt:Timestamp.now()},{merge:true});
     if(t.fromRoutine) mirrorRoutineDone(t.fromRoutine, t.uid||uid, status==='done');
@@ -1239,6 +1254,8 @@
   window.toggleMiss = (uid,id)=>{ expandedMiss.has(id)?expandedMiss.delete(id):expandedMiss.add(id); renderTaskList(uid); };
   window.setDisposition = async (uid,id,kind)=>{ const t=todayTasks.find(x=>x.id===id); if(t) t.disposition=kind; expandedMiss.add(id); renderTaskList(uid);
     try{ await setDoc(doc(db,"slots",id),{disposition:kind,updatedAt:Timestamp.now()},{merge:true}); }catch(e){ alert(fbErr(e)); } };
+  window.saveDoneNote = async (uid,id,val)=>{ const v=(val||'').trim(); const t=todayTasks.find(x=>x.id===id); if(t) t.doneNote=v;
+    try{ await setDoc(doc(db,"slots",id),{doneNote:v,updatedAt:Timestamp.now()},{merge:true}); }catch(e){ alert(fbErr(e)); } };
   window.saveReason = async (uid,id,val)=>{ const v=(val||'').trim(); const t=todayTasks.find(x=>x.id===id); if(t) t.incompleteReason=v;
     try{ await setDoc(doc(db,"slots",id),{incompleteReason:v,updatedAt:Timestamp.now()},{merge:true}); }catch(e){ alert(fbErr(e)); } };
   window.resolveHelp = async (uid, id) => {
