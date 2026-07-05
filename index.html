@@ -1260,7 +1260,7 @@
     const okSkip=await routineSkipIfNeeded(id);
     if(okSkip===false){ if(!confirm('‘다시 안 뜨게’ 기록에 실패했어요. 그래도 삭제하면 곧 다시 생길 수 있어요. 삭제할까요?')) return; }
     try{ await deleteDoc(doc(db,"slots",id)); }catch(e){ alert(fbErr(e)); return; }
-    todayTasks=todayTasks.filter(x=>x.id!==id); renderTaskList(uid); syncGoals(uid); closeModal();
+    todayTasks=todayTasks.filter(x=>x.id!==id); renderTaskList(uid); syncGoals(uid); closeSide();
     if(data) showToast('항목을 삭제했어요', '실행취소', async()=>{ try{ await setDoc(doc(db,"slots",id), {...data, updatedAt:Timestamp.now()}); showToast('되돌렸어요'); }catch(e){ alert(fbErr(e)); } });
   };
   // 중요표시 → daily.topGoals 미러(관리자 화면 호환)
@@ -1343,7 +1343,7 @@
   // ── 오늘 항목 상세 모달(시간·메모·링크·도움·삭제) ──
   window.openTaskDetail = (uid, id) => {
     const t=todayTasks.find(x=>x.id===id); if(!t) return;
-    showModal(`
+    showSide(`
       <div class="modal-title">항목 상세</div>
       <div class="form-group"><label>제목</label><input id="d-title" class="mini-input" style="width:100%" value="${esc(t.title)}"></div>
       <div class="form-group"><label>주제</label><div class="row" style="gap:6px"><select id="d-cat" class="mini-input" style="flex:1">${catOptions(t.category||'')}</select><button type="button" class="btn btn-ghost" onclick="newCatInline('d-cat')">＋ 새 주제</button></div></div>
@@ -1352,7 +1352,7 @@
       <div class="form-group"><label>메모 (선택)</label><textarea id="d-memo" class="ta">${esc(t.memo)}</textarea></div>
       <div class="form-group"><label>🔗 관련 링크</label><div id="s-links"></div><button type="button" class="btn btn-ghost" style="margin-top:6px" onclick="addLinkRow()">＋ 링크</button></div>
       <div class="form-group help-box"><label class="row" style="gap:6px;cursor:pointer"><input type="checkbox" id="d-help" ${t.needsHelp&&!t.helpResolved?'checked':''}> 🆘 이 업무 도움요청</label><input id="d-helpnote" class="mini-input" style="width:100%;margin-top:6px" placeholder="어디가 어려운지 한 줄 (선택)" value="${esc(t.helpNote)}"></div>
-      <div class="modal-footer"><button class="btn btn-danger" onclick="deleteTask('${uid}','${id}')">삭제</button><button class="btn btn-ghost" onclick="closeModal()">취소</button><button class="btn btn-primary" onclick="saveTaskDetail('${uid}','${id}')">저장</button></div>
+      <div class="modal-footer"><button class="btn btn-danger" onclick="deleteTask('${uid}','${id}')">삭제</button><button class="btn btn-ghost" onclick="closeSide()">취소</button><button class="btn btn-primary" onclick="saveTaskDetail('${uid}','${id}')">저장</button></div>
     `);
     (t.subtasks||[]).forEach(s=>modalSubRow(s.text,s.done));
     (t.links||[]).forEach(l=>addLinkRow(l.label,l.url)); if(!(t.links&&t.links.length)) addLinkRow();
@@ -1372,7 +1372,7 @@
     const payload={ title, category:$('d-cat')?.value||'', subtasks, plannedTime:$('d-time').value||'', memo:$('d-memo').value.trim(), links, needsHelp:$('d-help').checked, helpResolved:$('d-help').checked?false:(t.helpResolved||false), helpNote:$('d-helpnote').value.trim(), updatedAt:Timestamp.now() };
     Object.assign(t,payload);
     await setDoc(doc(db,"slots",id), payload, {merge:true});
-    renderTaskList(uid); closeModal();
+    renderTaskList(uid); closeSide();
   };
 
   // ── 자동저장(회고/막힌것/내일계획/내일목록) ──
