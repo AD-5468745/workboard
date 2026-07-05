@@ -294,13 +294,19 @@
   }
   window.wbSetBiz=(id)=>{ wbBiz=id; try{localStorage.setItem('wbBiz',id);}catch(e){} renderBizBar(); wbRenderActive(); };
   window.openBizManager=async()=>{ await loadBusinesses();
-    const rows=businesses.map(b=>`<div class="row-between" style="padding:7px 0;border-bottom:1px solid var(--border)"><span><span class="grp-dot" style="background:${b.color||'#cbd2dc'}"></span> ${esc(b.name)}</span><button class="btn btn-danger" onclick="deleteBiz('${b.id}')">삭제</button></div>`).join('');
+    const editId=window.__bizEditId||'';
+    const sw=(cur)=>CAT_COLORS.map(c=>`<span class="bsw${c===cur?' on':''}" data-c="${c}" onclick="this.parentElement.querySelectorAll('.bsw').forEach(x=>{x.style.border='2px solid transparent';x.classList.remove('on')});this.classList.add('on');this.style.border='2px solid #111'" style="display:inline-block;width:20px;height:20px;border-radius:50%;background:${c};margin:2px;cursor:pointer;border:2px solid ${c===cur?'#111':'transparent'}"></span>`).join('');
+    const rows=businesses.map(b=>{ if(b.id===editId){ return `<div style="padding:8px 0;border-bottom:1px solid var(--border)"><input id="biz-edit-name" class="mini-input" style="width:100%" value="${esc(b.name)}"><div id="biz-edit-colors" style="margin:6px 0">${sw(b.color||CAT_COLORS[0])}</div><div style="text-align:right"><button class="btn btn-ghost" onclick="bizCancelEdit()">취소</button> <button class="btn btn-primary" onclick="renameBiz('${b.id}')">저장</button></div></div>`; }
+      return `<div class="row-between" style="padding:7px 0;border-bottom:1px solid var(--border)"><span><span class="grp-dot" style="background:${b.color||'#cbd2dc'}"></span> ${esc(b.name)}</span><span style="white-space:nowrap"><button class="btn btn-ghost" onclick="bizStartEdit('${b.id}')">수정</button> <button class="btn btn-danger" onclick="deleteBiz('${b.id}')">삭제</button></span></div>`; }).join('');
     showModal(`<div class="modal-title">프로젝트 관리</div>
-      <div class="muted" style="margin-bottom:10px">프로젝트(예: 누드TV, 베팅의품격)를 만들면 상단에서 프로젝트별로 나눠 볼 수 있어요.</div>
+      <div class="muted" style="margin-bottom:10px">프로젝트(예: 누드TV, 베팅의품격)를 만들면 상단에서 프로젝트별로 나눠 볼 수 있어요. 각 항목의 <b>수정</b>으로 이름·색을 바꿀 수 있어요.</div>
       <div class="form-group"><label>새 프로젝트</label><div class="row" style="gap:6px"><input id="biz-name" class="mini-input" style="flex:1" placeholder="예: 누드TV"><button class="btn btn-primary" onclick="saveBiz()">＋ 추가</button></div></div>
       <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px"><div class="muted" style="margin-bottom:6px">등록됨 (${businesses.length})</div>${businesses.length?rows:'<div class="muted">아직 없음</div>'}</div>
       <div class="modal-footer"><button class="btn btn-ghost" onclick="closeModal()">닫기</button></div>`);
   };
+  window.bizStartEdit=(id)=>{ window.__bizEditId=id; openBizManager(); };
+  window.bizCancelEdit=()=>{ window.__bizEditId=''; openBizManager(); };
+  window.renameBiz=async(id)=>{ const name=$('biz-edit-name')?.value.trim(); if(!name){alert('이름을 입력하세요');return;} const on=document.querySelector('#biz-edit-colors .bsw.on'); const color=on?on.dataset.c:null; const payload={name,updatedAt:Timestamp.now()}; if(color)payload.color=color; try{ await setDoc(doc(db,"businesses",id),payload,{merge:true}); }catch(e){ alert(fbErr(e)); return; } window.__bizEditId=''; await loadBusinesses(); openBizManager(); renderBizBar(); };
   window.saveBiz=async()=>{ const n=$('biz-name')?.value.trim(); if(!n){alert('프로젝트 이름을 입력하세요');return;} const color=CAT_COLORS[businesses.length%CAT_COLORS.length]; try{ await addDoc(collection(db,"businesses"),{name:n,color,order:businesses.length,createdBy:currentUser.uid,createdAt:Timestamp.now()}); await loadBusinesses(); openBizManager(); renderBizBar(); }catch(e){ alert(fbErr(e)); } };
   window.deleteBiz=async(id)=>{ if(!confirm('이 프로젝트를 삭제할까요? (기존 업무의 프로젝트 태그는 남지만 목록에선 사라집니다)'))return; await deleteDoc(doc(db,"businesses",id)); await loadBusinesses(); openBizManager(); renderBizBar(); };
   const bizOptions=(sel)=>'<option value="">(프로젝트 미지정)</option>'+businesses.map(b=>`<option value="${b.id}" ${b.id===sel?'selected':''}>${esc(b.name)}</option>`).join('');
@@ -375,6 +381,7 @@
     renderBossMsgBanner(wbCache.daily);
     updateTabCounts();
     wbDetectNotify();
+    try{ ensureRoutineSlots(wbUid||currentUser.uid, today()); }catch(e){}
     const p=$('wb-panel'); if(!p) return;
     // 입력 중이면 재렌더 보류(캘린더는 즉시 반영)
     const ae=document.activeElement; const focused=p.contains(ae)&&/INPUT|TEXTAREA/.test((ae&&ae.tagName)||'');
@@ -743,6 +750,7 @@
     const title=$('bd-title').value.trim(); if(!title){ alert('제목을 입력하세요'); return; }
     const st=$('bd-start').value, en=$('bd-end').value; if(st&&en&&en<=st){ alert('종료가 시작보다 늦어야 합니다'); return; }
     await setDoc(doc(db,"slots",slotId),{ title, biz:$('bd-biz')?.value||'', status:window.__bdStatus||'todo', startTime:st||'', endTime:en||'', plannedTime:st||'', memo:$('bd-memo')?.value.trim()||'', updatedAt:Timestamp.now() },{merge:true});
+    try{ const sl=(wbCache.slots||[]).find(s=>s.id===slotId); if(sl&&sl.fromRoutine) mirrorRoutineDone(sl.fromRoutine, sl.uid, (window.__bdStatus||'todo')==='done'); }catch(e){}
     closeBlockDetail();
   };
   window.markStartNow = async (slotId)=>{
@@ -755,9 +763,17 @@
   window.quickToggleDone = async (uid, slotId)=>{
     const ref=doc(db,"slots",slotId); let cur; try{ const s=await getDoc(ref); if(!s.exists()) return; cur=s.data(); }catch(e){ return; }
     const nd=(cur.status||'todo')==='done' ? 'wip' : 'done';
-    try{ await setDoc(ref,{status:nd, updatedAt:Timestamp.now()},{merge:true}); }catch(e){ alert(fbErr(e)); }
+    try{ await setDoc(ref,{status:nd, updatedAt:Timestamp.now()},{merge:true}); }catch(e){ alert(fbErr(e)); return; }
+    if(cur.fromRoutine) mirrorRoutineDone(cur.fromRoutine, cur.uid||uid, nd==='done');
   };
-  window.deleteBlock = async (slotId)=>{ if(!confirm('이 업무를 삭제할까요?')) return; await deleteDoc(doc(db,"slots",slotId)); closeBlockDetail(); };
+  window.deleteBlock = async (slotId)=>{ if(!confirm('이 업무를 삭제할까요?')) return; await routineSkipIfNeeded(slotId); await deleteDoc(doc(db,"slots",slotId)); closeBlockDetail(); };
+  // 자동 생성된 필수업무 업무를 삭제하면, 그날은 다시 안 생기게 스킵 기록(다음날 자동 리셋)
+  async function routineSkipIfNeeded(slotId){
+    try{ let sl=(wbCache.slots||[]).find(s=>s.id===slotId); if(!sl){ const s=await getDoc(doc(db,"slots",slotId)); sl=s.exists()?s.data():null; }
+      if(sl&&sl.fromRoutine){ const u=sl.uid||wbUid||currentUser.uid; const ref=doc(db,"daily",`${u}_${today()}`); const snap=await getDoc(ref);
+        const sk=new Set(((snap.exists()?snap.data().routineSlotsSkipped:[])||[])); if(!sk.has(sl.fromRoutine)){ sk.add(sl.fromRoutine); await setDoc(ref,{uid:u,date:today(),routineSlotsSkipped:[...sk],updatedAt:Timestamp.now()},{merge:true}); } }
+    }catch(e){}
+  }
   window.closeBlockDetail = ()=>{ if(_threadUnsub){try{_threadUnsub();}catch(e){} _threadUnsub=null;} closeModal(); };
 
   // ══════════════════════════════════════
@@ -1025,6 +1041,7 @@
     const t=todayTasks.find(x=>x.id===id); if(!t) return;
     t.status=status; renderTaskList(uid);
     await setDoc(doc(db,"slots",id),{status,updatedAt:Timestamp.now()},{merge:true});
+    if(t.fromRoutine) mirrorRoutineDone(t.fromRoutine, t.uid||uid, status==='done');
     syncGoals(uid);
   };
   window.toggleImportant = async (uid, id) => {
@@ -1036,6 +1053,7 @@
   };
   window.deleteTask = async (uid, id) => {
     if(!confirm('이 항목을 삭제할까요?')) return;
+    await routineSkipIfNeeded(id);
     await deleteDoc(doc(db,"slots",id)); todayTasks=todayTasks.filter(x=>x.id!==id); renderTaskList(uid); syncGoals(uid); closeModal();
   };
   // 중요표시 → daily.topGoals 미러(관리자 화면 호환)
@@ -1064,22 +1082,35 @@
     await loadCategories(); const sel=$(selId); if(sel){ sel.innerHTML=catOptions(ref.id); sel.value=ref.id; }
   };
   window.openCategoryManager = async (uid) => {
-    await loadCategories();
-    const boss=userRole==='boss';
+    await loadCategories(); window.__cmUid=uid;
+    const boss=userRole==='boss'; const editId=window.__catEditId||'';
+    const sw=(cur)=>CAT_COLORS.map(c=>`<span class="csw${c===cur?' on':''}" data-c="${c}" onclick="this.parentElement.querySelectorAll('.csw').forEach(x=>{x.style.border='2px solid transparent';x.classList.remove('on')});this.classList.add('on');this.style.border='2px solid #111'" style="display:inline-block;width:20px;height:20px;border-radius:50%;background:${c};margin:2px;cursor:pointer;border:2px solid ${c===cur?'#111':'transparent'}"></span>`).join('');
     const rows = categories.map(c=>{ const mine=boss||c.createdBy===currentUser.uid;
-      return `<div class="row-between" style="padding:7px 0;border-bottom:1px solid var(--border)"><span><span class="grp-dot" style="background:${c.color||'#cbd2dc'}"></span> ${esc(c.name)}</span>${mine?`<button class="btn btn-danger" onclick="deleteCategory('${c.id}','${uid}')">삭제</button>`:'<span class="muted">다른 사람이 만듦</span>'}</div>`;
+      if(c.id===editId && mine){ return `<div style="padding:8px 0;border-bottom:1px solid var(--border)"><input id="cat-edit-name" class="mini-input" style="width:100%" value="${esc(c.name)}"><div id="cat-edit-colors" style="margin:6px 0">${sw(c.color||CAT_COLORS[0])}</div><div style="text-align:right"><button class="btn btn-ghost" onclick="catCancelEdit()">취소</button> <button class="btn btn-primary" onclick="renameCategory('${c.id}','${uid}')">저장</button></div></div>`; }
+      return `<div class="row-between" style="padding:7px 0;border-bottom:1px solid var(--border)"><span><span class="grp-dot" style="background:${c.color||'#cbd2dc'}"></span> ${esc(c.name)}</span>${mine?`<span style="white-space:nowrap"><button class="btn btn-ghost" onclick="catStartEdit('${c.id}')">수정</button> <button class="btn btn-danger" onclick="deleteCategory('${c.id}','${uid}')">삭제</button></span>`:'<span class="muted">다른 사람이 만듦</span>'}</div>`;
     }).join('');
     showModal(`
       <div class="modal-title">주제 관리</div>
       <div class="form-group"><label>새 주제</label>
         <div class="row" style="gap:6px"><input id="cat-name" class="mini-input" style="flex:1" placeholder="주제 이름 (예: 영업)"><button class="btn btn-primary" onclick="saveCategory('${uid}')">＋ 추가</button></div>
-        <div class="muted" style="margin-top:6px">색상은 자동 지정돼요. 항목 상세(⋯)에서 각 할 일에 주제를 붙입니다.</div>
+        <div class="muted" style="margin-top:6px">색상은 자동 지정돼요. 각 항목의 <b>수정</b>으로 이름·색을 바꿀 수 있어요.</div>
       </div>
       <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px">
         <div class="muted" style="margin-bottom:6px">등록된 주제 (${categories.length})</div>
         ${categories.length?rows:'<div class="muted">아직 없음</div>'}
       </div>
       <div class="modal-footer"><button class="btn btn-ghost" onclick="closeModal()">닫기</button></div>`);
+  };
+  window.catStartEdit = (cid) => { window.__catEditId=cid; openCategoryManager(window.__cmUid); };
+  window.catCancelEdit = () => { window.__catEditId=''; openCategoryManager(window.__cmUid); };
+  window.renameCategory = async (cid, uid) => {
+    const name=$('cat-edit-name')?.value.trim(); if(!name){ alert('이름을 입력하세요'); return; }
+    const on=document.querySelector('#cat-edit-colors .csw.on'); const color=on?on.dataset.c:null;
+    const payload={name,updatedAt:Timestamp.now()}; if(color)payload.color=color;
+    try{ await setDoc(doc(db,"categories",cid),payload,{merge:true}); }catch(e){ alert(fbErr(e)); return; }
+    window.__catEditId=''; await loadCategories(); openCategoryManager(uid);
+    if($('task-list')) renderTaskList(uid);
+    if($('routines-box')) loadRoutinesChecklist(wbUid||currentUser.uid,'routines-box',today());
   };
   window.saveCategory = async (uid) => {
     const name=$('cat-name')?.value.trim(); if(!name){ alert('주제 이름을 입력하세요'); return; }
@@ -1292,6 +1323,10 @@
     const dateStr=today(); const ref=doc(db,"daily",`${uid}_${dateStr}`); const snap=await getDoc(ref);
     const cur=new Set(((snap.exists()?snap.data().routinesDone:[])||[])); cur.has(rid)?cur.delete(rid):cur.add(rid);
     await setDoc(ref,{uid,date:dateStr,routinesDone:[...cur],updatedAt:Timestamp.now()},{merge:true});
+    // 자동 생성된 오늘 업무가 있으면 상태를 같이 맞춘다(양방향 동기화)
+    try{ const slotId=`${uid}_${dateStr}_rt_${rid}`; const sSnap=await getDoc(doc(db,"slots",slotId));
+      if(sSnap.exists()){ const want=cur.has(rid)?'done':'todo'; if((sSnap.data().status||'todo')!==want) await setDoc(doc(db,"slots",slotId),{status:want,updatedAt:Timestamp.now()},{merge:true}); }
+    }catch(e){}
     loadRoutinesChecklist(uid,'routines-box',dateStr);
   };
   window.openRoutineManager = async (uid) => {
@@ -1299,32 +1334,90 @@
     const boss=userRole==='boss'; const rSnap=await getDocs(collection(db,"routines"));
     const list=[]; rSnap.forEach(r=>{const d=r.data(); if(boss||d.createdBy===currentUser.uid) list.push({id:r.id,...d});});
     list.sort((a,b)=>(a.title||'').localeCompare(b.title||''));
+    window.__rtList=list; window.__rtUid=uid;
     let staffList=[], targetOpts=`<option value="${boss?'all':currentUser.uid}">${boss?'전 직원 공통':'나만'}</option>`;
     if(boss){ const us=await getDocs(query(collection(db,"users"),where("role","==","staff"))); us.forEach(u=>staffList.push({uid:u.id,name:u.data().displayName||u.id})); targetOpts+=staffList.map(s=>`<option value="${s.uid}">${esc(s.name)}만</option>`).join(''); }
     const nameOf=(t)=>t==='all'?'전체':(staffList.find(s=>s.uid===t)?.name||(t===currentUser.uid?'나':'개인'));
     const cm=catMapOf(); const catName=(cid)=> (cid&&cm[cid])?cm[cid].name:'기타'; const catColor=(cid)=>(cid&&cm[cid])?cm[cid].color:'#cbd2dc';
     showModal(`
       <div class="modal-title">필수 업무 관리</div>
-      <div class="muted" style="margin-bottom:12px;line-height:1.6">💡 <b>여러 개</b>를 등록할 수 있어요. 하나 넣고 "＋추가" → 또 넣고 "＋추가"를 반복하면 아래 목록에 쌓입니다. 주제를 달면 오늘 화면에서 <b>주제별로 묶여</b> 보여요.</div>
+      <div class="muted" style="margin-bottom:12px;line-height:1.6">💡 <b>여러 개</b>를 등록할 수 있어요. 하나 넣고 "＋추가" → 또 넣고 "＋추가"를 반복하면 아래 목록에 쌓입니다. 각 항목의 <b>수정</b>으로 언제든 고칠 수 있어요. <b>시간</b>을 넣으면 매일 그 시각에 <b>'오늘 진행중'과 캘린더에 자동으로</b> 나타납니다.</div>
+      <input type="hidden" id="rt-editing" value="">
       <div class="form-group"><label>제목 (하나의 필수 업무)</label><input id="rt-title" class="mini-input" style="width:100%" placeholder="예: 전일 이용회원 검수"></div>
+      <div class="row" style="gap:6px"><div class="form-group" style="flex:1"><label>시작 시간 (선택)</label><input id="rt-time" type="time" step="1800" class="mini-input" style="width:100%"></div><div class="form-group" style="flex:1"><label>종료 (선택)</label><input id="rt-end" type="time" step="1800" class="mini-input" style="width:100%"></div></div>
+      <div class="muted" style="margin:-4px 0 10px;font-size:11.5px">⏱ 시간을 비우면 지금처럼 체크리스트로만 쓰여요. 시간을 넣으면 매일 그 시각에 오늘 진행중·캘린더로 자동 등록됩니다.</div>
       <div class="form-group"><label>프로젝트</label><select id="rt-biz" class="mini-input" style="width:100%">${bizOptions(wbBiz)}</select></div>
       <div class="form-group"><label>주제 (선택)</label><div class="row" style="gap:6px"><select id="rt-cat" class="mini-input" style="flex:1">${catOptions('')}</select><button type="button" class="btn btn-ghost" onclick="newCatInline('rt-cat')">＋ 새 주제</button></div></div>
       ${boss?`<div class="form-group"><label>대상</label><select id="rt-target" class="mini-input" style="width:100%">${targetOpts}</select></div>`:`<input type="hidden" id="rt-target" value="${currentUser.uid}">`}
       <div class="form-group"><label>작업 절차 (SOP) — 단계별 방법 (선택)</label><textarea id="rt-guide" class="ta" style="height:76px" placeholder="1. ...&#10;2. ..."></textarea></div>
-      <div style="text-align:right"><button class="btn btn-primary" onclick="saveRoutine('${uid}')">＋ 추가</button></div>
+      <div style="text-align:right" id="rt-actions"><button class="btn btn-primary" id="rt-savebtn" onclick="saveRoutine('${uid}')">＋ 추가</button></div>
       <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:12px">
         <div class="muted" style="margin-bottom:6px">등록됨 (${list.length})</div>
-        ${list.length?list.map(r=>`<div class="row-between" style="padding:6px 0;border-bottom:1px solid var(--border)"><span><span class="grp-dot" style="background:${catColor(r.category)}"></span> ${esc(r.title)} <span class="muted">· ${esc(catName(r.category))} · ${esc(nameOf(r.targetUid))}</span></span><button class="btn btn-danger" onclick="deleteRoutine('${r.id}','${uid}')">삭제</button></div>`).join(''):'<div class="muted">아직 없음</div>'}
+        ${list.length?list.map(r=>`<div class="row-between" style="padding:6px 0;border-bottom:1px solid var(--border)"><span><span class="grp-dot" style="background:${catColor(r.category)}"></span> ${esc(r.title)}${r.time?` <span class="pill" style="background:#eef2ff;color:#3538cd;padding:1px 7px;border-radius:10px;font-size:11px">⏱ ${esc(r.time)}${r.endTime?'–'+esc(r.endTime):''}</span>`:''} <span class="muted">· ${esc(catName(r.category))} · ${esc(nameOf(r.targetUid))}</span></span><span style="white-space:nowrap"><button class="btn btn-ghost" onclick="routineEdit('${r.id}','${uid}')">수정</button> <button class="btn btn-danger" onclick="deleteRoutine('${r.id}','${uid}')">삭제</button></span></div>`).join(''):'<div class="muted">아직 없음</div>'}
       </div>
       <div class="modal-footer"><button class="btn btn-ghost" onclick="closeModal()">닫기</button></div>`);
+  };
+  window.routineEdit = (rid, uid) => {
+    const r=(window.__rtList||[]).find(x=>x.id===rid); if(!r){ alert('항목을 찾지 못했어요. 창을 다시 열어주세요.'); return; }
+    const set=(id,v)=>{ const e=$(id); if(e) e.value=(v==null?'':v); };
+    set('rt-editing',rid); set('rt-title',r.title||''); set('rt-time',r.time||''); set('rt-end',r.endTime||'');
+    set('rt-biz',r.biz||''); set('rt-cat',r.category||''); set('rt-guide',r.guide||'');
+    if($('rt-target')) $('rt-target').value=r.targetUid||'all';
+    const btn=$('rt-savebtn'); if(btn) btn.textContent='저장';
+    const act=$('rt-actions'); if(act && !$('rt-cancel')){ const c=document.createElement('button'); c.className='btn btn-ghost'; c.id='rt-cancel'; c.textContent='편집 취소'; c.style.marginRight='6px'; c.onclick=()=>window.routineCancelEdit(); act.insertBefore(c,act.firstChild); }
+    const t=$('rt-title'); if(t){ t.focus(); }
+  };
+  window.routineCancelEdit = () => {
+    ['rt-editing','rt-title','rt-time','rt-end','rt-guide'].forEach(id=>{ const e=$(id); if(e)e.value=''; });
+    const btn=$('rt-savebtn'); if(btn) btn.textContent='＋ 추가';
+    const c=$('rt-cancel'); if(c) c.remove();
   };
   window.saveRoutine = async (uid) => {
     const title=$('rt-title')?.value.trim(); if(!title){ alert('제목을 입력하세요'); return; }
     const tgt=(userRole==='boss')?($('rt-target')?.value||'all'):currentUser.uid; const guide=$('rt-guide')?.value.trim()||''; const category=$('rt-cat')?.value||''; const biz=$('rt-biz')?.value||wbBiz||'';
-    await addDoc(collection(db,"routines"),{title,guide,category,biz,targetUid:tgt,createdBy:currentUser.uid,active:true,createdAt:Timestamp.now()});
+    const time=$('rt-time')?.value||''; const endTime=$('rt-end')?.value||'';
+    if(time&&endTime&&endTime<=time){ alert('종료가 시작보다 늦어야 합니다'); return; }
+    const editing=$('rt-editing')?.value||'';
+    try{
+      if(editing){
+        await setDoc(doc(db,"routines",editing),{title,guide,category,biz,targetUid:tgt,time,endTime,updatedAt:Timestamp.now()},{merge:true});
+      }else{
+        await addDoc(collection(db,"routines"),{title,guide,category,biz,targetUid:tgt,time,endTime,createdBy:currentUser.uid,active:true,createdAt:Timestamp.now()});
+      }
+    }catch(e){ alert(fbErr(e)); return; }
     openRoutineManager(uid); if($('routines-box')) loadRoutinesChecklist(uid,'routines-box',today());
   };
   window.deleteRoutine = async (rid, uid) => { if(!confirm('삭제할까요?')) return; await deleteDoc(doc(db,"routines",rid)); openRoutineManager(uid); if($('routines-box')) loadRoutinesChecklist(uid,'routines-box',today()); };
+
+  // ── 시간 있는 필수업무 → 오늘 진행중·캘린더 자동 등록 ──
+  let _rtEnsuring=false;
+  async function ensureRoutineSlots(uid, dateStr){
+    if(_rtEnsuring || !uid || !currentUser || uid!==currentUser.uid) return; // 내 계정에서만 자동 생성
+    const routines=(wbCache.routines||[]).filter(r=>r.active!==false && r.time && (r.targetUid==='all'||r.targetUid===uid));
+    if(!routines.length) return;
+    const skipped=new Set(((wbCache.daily&&wbCache.daily.routineSlotsSkipped)||[]));
+    const existing=new Set((wbCache.slots||[]).filter(s=>s.date===dateStr).map(s=>s.id));
+    const toCreate=routines.filter(r=>{ const id=`${uid}_${dateStr}_rt_${r.id}`; return !existing.has(id) && !skipped.has(r.id); });
+    if(!toCreate.length) return;
+    _rtEnsuring=true;
+    try{
+      for(const r of toCreate){
+        const id=`${uid}_${dateStr}_rt_${r.id}`;
+        let en=r.endTime||''; if(!en){ const m=toMin(r.time); if(m!=null) en=minHM(Math.min(m+30,23*60+59)); }
+        const payload={ uid, date:dateStr, title:r.title||'필수 업무', biz:r.biz||'', category:r.category||'', status:'todo', important:false, startTime:r.time||'', endTime:en, plannedTime:r.time||'', weekStart:weekStart(new Date(dateStr+'T00:00:00')), fromRoutine:r.id, updatedAt:Timestamp.now() };
+        try{ await setDoc(doc(db,"slots",id), payload, {merge:true}); }catch(e){ console.error('[WB] ensureRoutineSlots',e); }
+      }
+    } finally { _rtEnsuring=false; }
+  }
+  // 필수업무(자동 생성 업무)의 완료 상태를 체크리스트(daily.routinesDone)에 미러
+  async function mirrorRoutineDone(routineId, uid, isDone){
+    if(!routineId||!uid) return;
+    try{ const ref=doc(db,"daily",`${uid}_${today()}`); const snap=await getDoc(ref);
+      const cur=new Set(((snap.exists()?snap.data().routinesDone:[])||[])); const has=cur.has(routineId);
+      if(isDone&&!has)cur.add(routineId); else if(!isDone&&has)cur.delete(routineId); else return;
+      await setDoc(ref,{uid,date:today(),routinesDone:[...cur],updatedAt:Timestamp.now()},{merge:true});
+    }catch(e){}
+  }
 
   // ── 주간 타임테이블(보조) ──
   async function renderWeekTimetable(uid, containerId, hoursArr){
