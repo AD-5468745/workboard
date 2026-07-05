@@ -1137,13 +1137,19 @@
 
   // ── 오늘 할 일 로드/렌더 ──
   async function loadTodayTasks(uid, dateStr){
-    const [snap] = await Promise.all([
-      getDocs(query(collection(db,"slots"),where("uid","==",uid),where("date","==",dateStr))),
-      loadCategories()
-    ]);
-    todayTasks=[]; snap.forEach(d=>todayTasks.push({id:d.id, ...d.data()}));
-    renderTaskList(uid);
-    // ⚠ 렌더 경로에서는 daily에 쓰지 않는다(실시간 리스너 재렌더 → 무한 깜빡임 방지). topGoals 갱신은 실제 변경(중요표시/상태변경) 시에만.
+    // ✅ 실시간 캐시(wbCache.slots)에서 바로 그린다 — 매 이벤트마다 서버 재쿼리하며 '비웠다 채우기'(사라졌다 나타났다·느림) 안 함.
+    if(!categories.length){ try{ await loadCategories(); }catch(e){} }   // 주제는 최초 1회만
+    const isThisWeek = (wbWeekStart===weekStart());
+    if(isThisWeek){
+      todayTasks=(wbCache.slots||[]).filter(s=> (s.uid||uid)===uid && s.date===dateStr);
+      renderTaskList(uid);
+    } else {
+      // 이번 주가 아닐 때만(드묾) 조회 — 실시간 캐시가 다른 주를 볼 때
+      try{ const snap=await getDocs(query(collection(db,"slots"),where("uid","==",uid),where("date","==",dateStr)));
+        todayTasks=[]; snap.forEach(d=>todayTasks.push({id:d.id, ...d.data()})); }catch(e){ console.error('[WB] loadTodayTasks',e); }
+      renderTaskList(uid);
+    }
+    // ⚠ 렌더 경로에서는 daily에 쓰지 않는다(실시간 리스너 재렌더 → 무한 깜빡임 방지).
   }
   function sortTasks(a,b){
     if(!!b.important - !!a.important) return (!!b.important)-(!!a.important);
