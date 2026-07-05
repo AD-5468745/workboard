@@ -242,7 +242,11 @@
       memoEditId=null; memoShareOpen=false; memoImages=[]; renderMemoPanel();
     }catch(e){ alert(fbErr(e)); }
   };
-  window.deleteMemo=async(id)=>{ if(!confirm('이 메모를 삭제할까요?')) return; try{ await deleteDoc(doc(db,"memos",id)); renderMemoPanel(); }catch(e){ alert(fbErr(e)); } };
+  window.deleteMemo=async(id)=>{ if(!confirm('이 메모를 삭제할까요?')) return;
+    const m=memos.find(x=>x.id===id); const data=m?{...m}:null; if(data) delete data.id;
+    try{ await deleteDoc(doc(db,"memos",id)); renderMemoPanel(); }catch(e){ alert(fbErr(e)); return; }
+    if(data) showToast('메모를 삭제했어요', '실행취소', async()=>{ try{ await setDoc(doc(db,"memos",id), {...data, updatedAt:Timestamp.now()}); renderMemoPanel(); showToast('되돌렸어요'); }catch(e){ alert(fbErr(e)); } });
+  };
   // 메모장 폭 조절(왼쪽 막대 드래그) + 저장
   let _memoResizeBound=false;
   function setupMemoResize(){
@@ -467,7 +471,10 @@
     const t0=_audioCtx.currentTime; const notes=[[784,0],[988,0.16],[1319,0.32]];  // G5·B5·E6 3음 차임(길고 또렷)
     notes.forEach(([f,dt])=>{ const o=_audioCtx.createOscillator(), g=_audioCtx.createGain(); o.type='triangle'; o.frequency.value=f; o.connect(g); g.connect(_audioCtx.destination); const t=t0+dt; g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.34,t+0.03); g.gain.exponentialRampToValueAtTime(0.0001,t+0.5); o.start(t); o.stop(t+0.52); });
   }catch(e){} }
-  function showToast(msg){ let t=$('wb-toast'); if(!t){ t=el('div'); t.id='wb-toast'; t.className='wb-toast'; document.body.appendChild(t); } t.textContent=msg; t.classList.add('show'); clearTimeout(_toastT); _toastT=setTimeout(()=>t.classList.remove('show'),5200); }
+  function showToast(msg, actionLabel, actionFn){ let t=$('wb-toast'); if(!t){ t=el('div'); t.id='wb-toast'; t.className='wb-toast'; document.body.appendChild(t); }
+    if(actionLabel && typeof actionFn==='function'){ t.innerHTML=''; const sp=el('span'); sp.textContent=msg; const b=el('button','toast-undo'); b.textContent=actionLabel; b.onclick=()=>{ t.classList.remove('show'); clearTimeout(_toastT); try{ actionFn(); }catch(e){ console.error(e); } }; t.appendChild(sp); t.appendChild(b); }
+    else { t.textContent=msg; }
+    t.classList.add('show'); clearTimeout(_toastT); _toastT=setTimeout(()=>t.classList.remove('show'), (actionLabel?8000:5200)); }
   document.addEventListener('click',(e)=>{ if(_notifOpen){ const w=e.target.closest&&e.target.closest('.notif-wrap'); if(!w){ _notifOpen=false; const p=$('notif-panel'); if(p)p.style.display='none'; } } });
   // 업무 '시작 시간' 알람 — 메시지 차임과 다른 또렷한 부저음(스퀘어파 4연타)
   window.alarmBeep=()=>{ if(localStorage.getItem('wbNotifSound')==='0') return; try{
@@ -476,8 +483,17 @@
     seq.forEach(([f,dt])=>{ const o=_audioCtx.createOscillator(), g=_audioCtx.createGain(); o.type='square'; o.frequency.value=f; o.connect(g); g.connect(_audioCtx.destination); const t=t0+dt; g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.26,t+0.02); g.gain.exponentialRampToValueAtTime(0.0001,t+0.18); o.start(t); o.stop(t+0.2); });
   }catch(e){} };
   // 오늘 내 스케줄의 시작 시각이 되면 알람
-  let _schedTimer=null, _startAlerted=new Set(), _endAlerted=new Set();
-  function startScheduleWatch(){ if(_schedTimer) clearInterval(_schedTimer); _startAlerted=new Set(); _endAlerted=new Set(); _schedTimer=setInterval(()=>{ checkScheduleStart(); checkScheduleEnd(); }, 30000); }
+  let _schedTimer=null, _startAlerted=new Set(), _endAlerted=new Set(), _watchDay=null;
+  function startScheduleWatch(){ if(_schedTimer) clearInterval(_schedTimer); _startAlerted=new Set(); _endAlerted=new Set(); _watchDay=today();
+    _schedTimer=setInterval(()=>{
+      if(today()!==_watchDay){ // 자정 넘어 날짜 바뀜 → 리스너·이월 재시작(어제 화면에 오늘 쓰기 방지)
+        _watchDay=today();
+        if(currentUser){ try{ runCarryover(currentUser.uid, today()).catch(()=>{}); wbStartRealtime(wbUid||currentUser.uid); }catch(e){ console.error('[WB] rollover',e); } }
+        return;
+      }
+      checkScheduleStart(); checkScheduleEnd();
+    }, 30000);
+  }
   function checkScheduleStart(){
     try{
       if(!currentUser) return; const uid=wbUid||currentUser.uid; if(uid!==currentUser.uid) return;   // 내 스케줄만 알람
@@ -531,22 +547,24 @@
     const anchor=(wbCache.slots||[]).find(x=>x.id===slotId); if(!anchor){ closeModal(); return; }
     const uid=anchor.uid||wbUid||currentUser.uid; const t=anchor.date||today();
     const anchorEnd=slotEndMin(anchor); if(anchorEnd==null){ closeModal(); return; }
-    const CAP=23*60+59; const cap=(m)=>Math.min(m,CAP);
+    const CAP=23*60+59;
     const later=(wbCache.slots||[]).filter(s=> s.date===t && (s.uid||uid)===uid && s.id!==anchor.id && slotStartMin(s)!=null && slotStartMin(s)>=anchorEnd && (s.status||'todo')!=='done');
+    // 먼저 하루(밤)를 넘어가는지 검사 → 넘으면 밀지 않음(23:59에 뭉개져 겹침·역전되는 것 방지)
+    let maxEnd=anchorEnd+delta;
+    later.forEach(s=>{ const emx=(slotEndMin(s)!=null?slotEndMin(s):slotStartMin(s)+30); maxEnd=Math.max(maxEnd, emx+delta); });
+    if(maxEnd>CAP){ alert(`${delta}분 밀면 뒤 업무가 하루(밤 24시)를 넘어가요. 이만큼은 밀 수 없어서 그대로 뒀어요.\n\n필요하면 더 작은 시간으로 밀거나, 뒤 업무의 시간을 직접 조정해 주세요.`); return; }
     const changes=[{id:anchor.id, startTime:anchor.startTime||'', endTime:anchor.endTime||'', plannedTime:anchor.plannedTime||''}];
-    const ops=[ setDoc(doc(db,"slots",anchor.id),{endTime:minHM(cap(anchorEnd+delta)),updatedAt:Timestamp.now()},{merge:true}) ];
-    let overflow=false;
+    const ops=[ setDoc(doc(db,"slots",anchor.id),{endTime:minHM(anchorEnd+delta),updatedAt:Timestamp.now()},{merge:true}) ];
     later.forEach(s=>{
       changes.push({id:s.id, startTime:s.startTime||'', endTime:s.endTime||'', plannedTime:s.plannedTime||''});
       const sm=slotStartMin(s), emx=(slotEndMin(s)!=null?slotEndMin(s):sm+30);
-      const ns=sm+delta, ne=emx+delta; if(ns>CAP||ne>CAP) overflow=true;
-      const nStart=minHM(cap(ns));
-      ops.push(setDoc(doc(db,"slots",s.id),{startTime:nStart, plannedTime:nStart, endTime:minHM(cap(ne)), updatedAt:Timestamp.now()},{merge:true}));
+      const nStart=minHM(sm+delta);
+      ops.push(setDoc(doc(db,"slots",s.id),{startTime:nStart, plannedTime:nStart, endTime:minHM(emx+delta), updatedAt:Timestamp.now()},{merge:true}));
     });
     try{ await Promise.all(ops); }catch(e){ alert(fbErr(e)); return; }
     window.__lastPush={items:changes}; _endAlerted.delete(anchor.id+'@'+t);   // 새 종료시각에 다시 알림 가능
     showModal(`<div class="modal-title">✅ 일정을 밀었어요</div>
-      <div style="margin-bottom:14px;line-height:1.6">'<b>${esc(anchor.title||'업무')}</b>' 종료를 <b>${delta}분</b> 늘리고, 뒤 업무 <b>${later.length}개</b>를 ${delta}분씩 뒤로 옮겼어요.${overflow?'<br><span style="color:var(--warn)">※ 일부 업무가 근무시간을 넘어 끝시간(23:59)에 맞춰 조정됐어요.</span>':''}</div>
+      <div style="margin-bottom:14px;line-height:1.6">'<b>${esc(anchor.title||'업무')}</b>' 종료를 <b>${delta}분</b> 늘리고, 뒤 업무 <b>${later.length}개</b>를 ${delta}분씩 뒤로 옮겼어요.</div>
       <div class="modal-footer"><button class="btn btn-ghost" onclick="undoPush()">되돌리기</button><button class="btn btn-primary" onclick="closeModal()">확인</button></div>`);
   };
   window.undoPush = async () => {
@@ -617,7 +635,7 @@
     for(let i=0;i<7;i++){ const dd=new Date(wsDate); dd.setDate(dd.getDate()+i); dayList.push(ymd(dd)); }
     const tds=today();
     const rows=Math.max(1,Math.round((eMin-sMin)/CAL_STEP));
-    const legend=categories.length?('<div class="legend">'+categories.map(c=>`<span class="item"><span class="sw" style="background:${c.color||'#cbd2dc'}"></span>${esc(c.name)}</span>`).join('')+`<span class="hint">근무 ${minHM(sMin)}–${minHM(eMin)} · 30분 · 빈칸 클릭·드래그로 추가</span></div>`):`<div class="legend"><span class="hint">근무 ${minHM(sMin)}–${minHM(eMin)} · 30분 · 빈칸 클릭·드래그로 추가 · 주제는 '오늘 진행중'에서 관리</span></div>`;
+    const legend=categories.length?('<div class="legend">'+categories.map(c=>`<span class="item"><span class="sw" style="background:${c.color||'#cbd2dc'}"></span>${esc(c.name)}</span>`).join('')+`<span class="hint">근무 ${minHM(sMin)}–${minHM(eMin)} · 30분 · 빈칸을 끌어서(드래그) 추가 · ＋업무 추가 버튼도 가능</span></div>`):`<div class="legend"><span class="hint">근무 ${minHM(sMin)}–${minHM(eMin)} · 30분 · 빈칸을 끌어서(드래그) 추가 · ＋업무 추가 버튼도 가능 · 주제는 '오늘 진행중'에서 관리</span></div>`;
     let timeCol='<div class="cal-tcol" style="height:'+(rows*CAL_ROWH)+'px">';
     for(let m=sMin;m<=eMin;m+=60){ const y=(m-sMin)/CAL_STEP*CAL_ROWH; const tf=(m===sMin)?'translateY(1px)':(m>=eMin?'translateY(-100%)':'translateY(-50%)'); timeCol+=`<div class="tl" style="top:${y}px;transform:${tf}">${minHM(m)}</div>`; }
     timeCol+='</div>';
@@ -704,13 +722,17 @@
 
   function attachDrag(col, ds, sMin, uid){
     const isOwner=currentUser.uid===uid, isBoss=userRole==='boss'; if(!isOwner&&!isBoss) return;
-    let dragging=false, startSlot=0, ghost=null;
+    let armed=false, dragging=false, startSlot=0, startY=0, ghost=null;
+    const THRESH=6;   // 이만큼 끌어야 '드래그'로 인정 → 살짝 클릭으로 인한 오생성 방지
     const slotAt=(clientY)=>{ const r=col.getBoundingClientRect(); return Math.max(0,Math.floor((clientY-r.top)/CAL_ROWH)); };
-    const clear=()=>{ dragging=false; if(ghost){ghost.remove();ghost=null;} };
-    col.addEventListener('mousedown',(e)=>{ if(e.target!==col) return; dragging=true; startSlot=slotAt(e.clientY);
-      ghost=el('div','drag-ghost'); ghost.style.top=(startSlot*CAL_ROWH)+'px'; ghost.style.height=(CAL_ROWH-3)+'px'; ghost.textContent='＋'; col.appendChild(ghost); e.preventDefault(); });
-    col.addEventListener('mousemove',(e)=>{ if(!dragging||!ghost) return; const cur=slotAt(e.clientY); const a=Math.min(startSlot,cur), b=Math.max(startSlot,cur)+1; ghost.style.top=(a*CAL_ROWH)+'px'; ghost.style.height=((b-a)*CAL_ROWH-3)+'px'; ghost.textContent=`${minHM(sMin+a*CAL_STEP)}–${minHM(sMin+b*CAL_STEP)}`; });
-    col.addEventListener('mouseup',(e)=>{ if(!dragging) return; const cur=slotAt(e.clientY); const a=Math.min(startSlot,cur), b=Math.max(startSlot,cur)+1; clear(); openNewBlock(uid, ds, minHM(sMin+a*CAL_STEP), minHM(sMin+b*CAL_STEP)); });
+    const clear=()=>{ armed=false; dragging=false; if(ghost){ghost.remove();ghost=null;} };
+    col.addEventListener('mousedown',(e)=>{ if(e.target!==col) return; armed=true; dragging=false; startSlot=slotAt(e.clientY); startY=e.clientY; e.preventDefault(); });
+    col.addEventListener('mousemove',(e)=>{ if(!armed) return;
+      if(!dragging){ if(Math.abs(e.clientY-startY)<THRESH) return; dragging=true; ghost=el('div','drag-ghost'); col.appendChild(ghost); }
+      const cur=slotAt(e.clientY); const a=Math.min(startSlot,cur), b=Math.max(startSlot,cur)+1; ghost.style.top=(a*CAL_ROWH)+'px'; ghost.style.height=((b-a)*CAL_ROWH-3)+'px'; ghost.textContent=`${minHM(sMin+a*CAL_STEP)}–${minHM(sMin+b*CAL_STEP)}`; });
+    col.addEventListener('mouseup',(e)=>{ const wasDrag=dragging; const s0=startSlot; clear(); if(!wasDrag) return;   // 끌지 않은 '그냥 클릭'은 무시(오생성 방지). 빠른 추가는 상단 ＋업무 추가 버튼.
+      const cur=slotAt(e.clientY); const a=Math.min(s0,cur), b=Math.max(s0,cur)+1; openNewBlock(uid, ds, minHM(sMin+a*CAL_STEP), minHM(sMin+b*CAL_STEP)); });
+    col.addEventListener('mouseleave',()=>{ if(armed && !dragging) armed=false; });
     col.addEventListener('mouseleave',()=>{ if(dragging) clear(); });
   }
   window.openNewBlock = async (uid, ds, startT, endT)=>{
@@ -780,7 +802,8 @@
     const inp=$('bd-reply'); const text=(inp?.value||'').trim(); if(!text) return;
     const ref=doc(db,"slots",slotId); const snap=await getDoc(ref); const cur=(snap.exists()&&snap.data().comments)||[];
     cur.push({by:currentUser.uid, byName:(userProfile&&userProfile.displayName)||'', role:userRole||'staff', text, at:Timestamp.now()});
-    await setDoc(ref,{comments:cur, lastMsgAt:Timestamp.now()},{merge:true});
+    try{ await setDoc(ref,{comments:cur, lastMsgAt:Timestamp.now()},{merge:true}); }
+    catch(e){ alert(fbErr(e)+'\n(메시지가 저장되지 않으면 Firestore 규칙에서 slots의 comments 쓰기 허용이 필요할 수 있어요.)'); return; }
     if(inp){ inp.value=''; inp.focus(); }
   };
   window.editBlockMsg = async (slotId,i)=>{
@@ -822,13 +845,23 @@
     try{ await setDoc(ref,{status:nd, updatedAt:Timestamp.now()},{merge:true}); }catch(e){ alert(fbErr(e)); return; }
     if(cur.fromRoutine) mirrorRoutineDone(cur.fromRoutine, cur.uid||uid, nd==='done');
   };
-  window.deleteBlock = async (slotId)=>{ if(!confirm('이 업무를 삭제할까요?')) return; await routineSkipIfNeeded(slotId); await deleteDoc(doc(db,"slots",slotId)); closeBlockDetail(); };
-  // 자동 생성된 필수업무 업무를 삭제하면, 그날은 다시 안 생기게 스킵 기록(다음날 자동 리셋)
+  window.deleteBlock = async (slotId)=>{ if(!confirm('이 업무를 삭제할까요?')) return;
+    let data=null; try{ const s=await getDoc(doc(db,"slots",slotId)); data=s.exists()?s.data():null; }catch(e){}
+    const okSkip=await routineSkipIfNeeded(slotId);
+    if(okSkip===false){ if(!confirm('‘다시 안 뜨게’ 기록에 실패했어요(저장 권한 문제일 수 있음). 그래도 삭제하면 곧 다시 생길 수 있어요. 삭제할까요?')) return; }
+    try{ await deleteDoc(doc(db,"slots",slotId)); }catch(e){ alert(fbErr(e)); return; }
+    closeBlockDetail();
+    if(data) showToast('업무를 삭제했어요', '실행취소', async()=>{ try{ await setDoc(doc(db,"slots",slotId), {...data, updatedAt:Timestamp.now()}); showToast('되돌렸어요'); }catch(e){ alert(fbErr(e)); } });
+  };
+  // 자동 생성된 필수업무 업무를 삭제하면, 그날은 다시 안 생기게 스킵 기록(성공=true / 실패=false / 대상아님=true)
   async function routineSkipIfNeeded(slotId){
-    try{ let sl=(wbCache.slots||[]).find(s=>s.id===slotId); if(!sl){ const s=await getDoc(doc(db,"slots",slotId)); sl=s.exists()?s.data():null; }
-      if(sl&&sl.fromRoutine){ const u=sl.uid||wbUid||currentUser.uid; const ref=doc(db,"daily",`${u}_${today()}`); const snap=await getDoc(ref);
-        const sk=new Set(((snap.exists()?snap.data().routineSlotsSkipped:[])||[])); if(!sk.has(sl.fromRoutine)){ sk.add(sl.fromRoutine); await setDoc(ref,{uid:u,date:today(),routineSlotsSkipped:[...sk],updatedAt:Timestamp.now()},{merge:true}); } }
-    }catch(e){}
+    let sl=(wbCache.slots||[]).find(s=>s.id===slotId);
+    if(!sl){ try{ const s=await getDoc(doc(db,"slots",slotId)); sl=s.exists()?s.data():null; }catch(e){ return true; } }
+    if(!sl || !sl.fromRoutine) return true;
+    try{ const u=sl.uid||wbUid||currentUser.uid; const ref=doc(db,"daily",`${u}_${today()}`); const snap=await getDoc(ref);
+      const sk=new Set(((snap.exists()?snap.data().routineSlotsSkipped:[])||[])); if(!sk.has(sl.fromRoutine)){ sk.add(sl.fromRoutine); await setDoc(ref,{uid:u,date:today(),routineSlotsSkipped:[...sk],updatedAt:Timestamp.now()},{merge:true}); }
+      return true;
+    }catch(e){ console.error('[WB] routineSkip',e); return false; }
   }
   window.closeBlockDetail = ()=>{ if(_threadUnsub){try{_threadUnsub();}catch(e){} _threadUnsub=null;} closeModal(); };
 
@@ -981,27 +1014,29 @@
 
   // ── 자동 이월: 이전 마지막 근무일의 미완 → 오늘(원본 보존, 중복 방지) ──
   async function runCarryover(uid, dateStr){
+    if(!currentUser || uid!==currentUser.uid) return;   // 본인 접속 때만 이월(관리자가 직원 화면 열 땐 읽기만)
     const dref=doc(db,"daily",`${uid}_${dateStr}`);
     const dsnap=await getDoc(dref);
     if(dsnap.exists() && dsnap.data().carryDone) return;
     const all=await getDocs(query(collection(db,"slots"),where("uid","==",uid)));
-    const byDate={}; const todayTitles=[];
-    all.forEach(d=>{ const s=d.data(); if(!s.date) return; if(s.date===dateStr){ if(s.title) todayTitles.push(s.title.trim()); } else if(s.date<dateStr){ (byDate[s.date]=byDate[s.date]||[]).push(s); } });
+    const byDate={}; const todayTitles=new Set(); const carriedIds=new Set();
+    all.forEach(d=>{ const s=d.data(); if(!s.date) return;
+      if(s.date===dateStr){ if(s.title) todayTitles.add(s.title.trim()); if(s.carriedFromId) carriedIds.add(s.carriedFromId); }
+      else if(s.date<dateStr){ (byDate[s.date]=byDate[s.date]||[]).push({id:d.id,...s}); } });
     const prev=Object.keys(byDate).sort().reverse();
     if(!prev.length){ await setDoc(dref,{uid,date:dateStr,carryDone:'none',updatedAt:Timestamp.now()},{merge:true}); return; }
     const src=prev[0];
     const undone=byDate[src].filter(s=>s.title && s.status!=='done');
-    const seen=new Set(todayTitles.map(x=>(x||'').trim()));
     const writes=[];
     for(const s of undone){
-      const tt=(s.title||'').trim();
-      if(seen.has(tt)) continue; seen.add(tt);
+      if(carriedIds.has(s.id)) continue; carriedIds.add(s.id);   // 원본 업무 id로 중복 방지(제목 아님 → 같은 제목 2건도 각각 이월)
       const id=`${uid}_${dateStr}_${newKey()}`;
-      writes.push(setDoc(doc(db,"slots",id),{ uid, date:dateStr, title:s.title, biz:s.biz||'', status:'todo', important:!!s.important, category:s.category||'', subtasks:(s.subtasks||[]).map(x=>({text:x.text,done:!!x.done})), startTime:s.startTime||s.plannedTime||'', endTime:s.endTime||'', plannedTime:s.plannedTime||s.startTime||s.hour||'', links:s.links||[], carriedFrom:src, weekStart:weekStart(new Date(dateStr)), updatedAt:Timestamp.now() }));
+      writes.push(setDoc(doc(db,"slots",id),{ uid, date:dateStr, title:s.title, biz:s.biz||'', status:'todo', important:!!s.important, category:s.category||'', subtasks:(s.subtasks||[]).map(x=>({text:x.text,done:!!x.done})), startTime:s.startTime||s.plannedTime||'', endTime:s.endTime||'', plannedTime:s.plannedTime||s.startTime||s.hour||'', links:s.links||[], carriedFrom:src, carriedFromId:s.id, weekStart:weekStart(new Date(dateStr)), updatedAt:Timestamp.now() }));
     }
-    // 전날 '내일 할 일 목록'(daily.tomorrowTasks)도 오늘 할 일로 이월
+    // 전날 '내일 할 일 목록'(daily.tomorrowTasks)도 오늘 할 일로 이월(목록은 id가 없어 제목으로 중복 방지)
     try{ const pd=await getDoc(doc(db,"daily",`${uid}_${src}`));
       const plan=pd.exists()?(pd.data().tomorrowTasks||[]):[];
+      const seen=new Set([...todayTitles]);
       for(const raw of plan){ const tt=(raw||'').trim(); if(!tt||seen.has(tt)) continue; seen.add(tt);
         const id=`${uid}_${dateStr}_${newKey()}`;
         writes.push(setDoc(doc(db,"slots",id),{ uid, date:dateStr, title:tt, status:'todo', important:false, carriedFrom:src, fromPlan:true, weekStart:weekStart(new Date(dateStr)), updatedAt:Timestamp.now() }));
@@ -1109,8 +1144,12 @@
   };
   window.deleteTask = async (uid, id) => {
     if(!confirm('이 항목을 삭제할까요?')) return;
-    await routineSkipIfNeeded(id);
-    await deleteDoc(doc(db,"slots",id)); todayTasks=todayTasks.filter(x=>x.id!==id); renderTaskList(uid); syncGoals(uid); closeModal();
+    let data=null; try{ const s=await getDoc(doc(db,"slots",id)); data=s.exists()?s.data():null; }catch(e){}
+    const okSkip=await routineSkipIfNeeded(id);
+    if(okSkip===false){ if(!confirm('‘다시 안 뜨게’ 기록에 실패했어요. 그래도 삭제하면 곧 다시 생길 수 있어요. 삭제할까요?')) return; }
+    try{ await deleteDoc(doc(db,"slots",id)); }catch(e){ alert(fbErr(e)); return; }
+    todayTasks=todayTasks.filter(x=>x.id!==id); renderTaskList(uid); syncGoals(uid); closeModal();
+    if(data) showToast('항목을 삭제했어요', '실행취소', async()=>{ try{ await setDoc(doc(db,"slots",id), {...data, updatedAt:Timestamp.now()}); showToast('되돌렸어요'); }catch(e){ alert(fbErr(e)); } });
   };
   // 중요표시 → daily.topGoals 미러(관리자 화면 호환)
   async function syncGoals(uid){
@@ -2146,8 +2185,10 @@ body{font-family:-apple-system,'Malgun Gothic','맑은 고딕',sans-serif;backgr
 .nt-task{font-size:11.5px;font-weight:700;color:var(--accent-text);}
 .nt-text{font-size:12.5px;color:var(--text);line-height:1.45;margin-top:2px;word-break:break-word;}
 .nt-meta{font-size:10.5px;color:var(--text-3);margin-top:3px;}
-.wb-toast{position:fixed;right:20px;bottom:20px;max-width:340px;background:#1f2430;color:#fff;font-size:13px;line-height:1.45;padding:11px 14px;border-radius:10px;box-shadow:0 10px 28px rgba(0,0,0,.28);opacity:0;transform:translateY(10px);transition:opacity .18s,transform .18s;pointer-events:none;z-index:9999;word-break:break-word;}
-.wb-toast.show{opacity:1;transform:translateY(0);}
+.wb-toast{position:fixed;right:20px;bottom:20px;max-width:340px;background:#1f2430;color:#fff;font-size:13px;line-height:1.45;padding:11px 14px;border-radius:10px;box-shadow:0 10px 28px rgba(0,0,0,.28);opacity:0;transform:translateY(10px);transition:opacity .18s,transform .18s;pointer-events:none;z-index:9999;word-break:break-word;display:flex;align-items:center;gap:12px;}
+.wb-toast.show{opacity:1;transform:translateY(0);pointer-events:auto;}
+.toast-undo{flex:none;background:#38bdf8;color:#08131f;border:none;border-radius:7px;padding:5px 12px;font-size:12.5px;font-weight:800;cursor:pointer;}
+.toast-undo:hover{background:#7dd3fc;}
 </style>
 </head>
 <body>
