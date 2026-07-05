@@ -707,6 +707,7 @@
         const w=100/o.cols, left=w*o.col;
         const div=el('div','evt'+(state?' '+state:''));
         div.style.cssText=`top:${top}px;height:${H}px;left:calc(${left}% + 2px);width:calc(${w}% - 4px);background:${hexA(c,.18)};border-left-color:${c}`;
+        div.title=`${ev.title||''} · ${minHM(a)}–${minHM(b)}${st==='done'?' (완료)':(carried?' (이월)':'')}`;   // 잘린 블록도 마우스 올리면 전체 보임
         let sb=''; if(st==='done') sb=`<span class="badge b-done" title="완료 취소" onclick="event.stopPropagation();quickToggleDone('${uid}','${ev.id}')">✓</span>`; else if(help) sb='<span class="badge b-help" title="막힌 업무">!</span>'; else if(carried) sb='<span class="badge b-carry" title="이월된 업무">이월</span>';
         const chat = nc?'<span class="badge b-chat">💬</span>':'';
         const qc = st!=='done' ? `<span class="evt-check" title="완료 표시" onclick="event.stopPropagation();quickToggleDone('${uid}','${ev.id}')">✓</span>` : '';
@@ -1106,7 +1107,7 @@
     const carried=!!t.carriedFrom;
     const subs=t.subtasks||[]; const subDone=subs.filter(s=>s.done).length;
     const expanded=expandedSubs.has(t.id);
-    const row=el('div','task-row'+(t.important?' task-important':'')+(carried?' carry-item':'')+(st==='done'?' task-done':''));
+    const row=el('div','task-row status-'+st+(t.important?' task-important':'')+(carried?' carry-item':'')+(st==='done'?' task-done':''));
     const seg=(s,lbl,cls)=>`<button class="seg ${st===s?'on '+cls:''}" onclick="setTaskStatus('${uid}','${t.id}','${s}')">${lbl}</button>`;
     const subLine = subs.length?`<span class="subline" onclick="toggleSub('${uid}','${t.id}')">🗂 하위 ${subDone}/${subs.length} ${expanded?'▾':'▸'}</span>`:'';
     let subBox='';
@@ -1907,9 +1908,12 @@ body{font-family:-apple-system,'Malgun Gothic','맑은 고딕',sans-serif;backgr
 .task-row{display:flex;align-items:flex-start;gap:10px;padding:11px 12px;background:var(--surface);border:1px solid var(--border);border-radius:10px;margin-bottom:8px;transition:box-shadow .12s;}
 .task-row:hover{box-shadow:0 2px 8px rgba(30,40,80,.06);}
 .task-row.static{cursor:default;}
-.task-row.carry-item{background:var(--warn-bg);border-color:#f0d9a8;box-shadow:inset 3px 0 0 #f59e0b;animation:slideIn .45s ease both;}
+.task-row.carry-item{animation:slideIn .45s ease both;}
+/* 상태별 카드색(완료/진행/대기 일관) — 완료는 아래 .task-done(초록) */
+.task-row.status-wip{background:rgba(217,119,6,.09);box-shadow:inset 4px 0 0 #d97706;}
+.task-row.status-todo{background:rgba(100,116,139,.07);box-shadow:inset 4px 0 0 #94a3b8;}
 /* 완료 = 성취(초록 강조, 줄긋기 없음) */
-.task-row.task-done{background:rgba(22,163,74,.07);box-shadow:inset 3px 0 0 #16a34a;}
+.task-row.task-done{background:rgba(22,163,74,.08);box-shadow:inset 4px 0 0 #16a34a;}
 .task-row.task-done .task-title{text-decoration:none;color:#137a3a;font-weight:700;}
 .task-row.task-done .task-title::before{content:'✓ ';color:#16a34a;font-weight:800;}
 .star{font-size:17px;color:var(--text-3);cursor:pointer;flex-shrink:0;line-height:1.4;user-select:none;}
@@ -2128,7 +2132,7 @@ body{font-family:-apple-system,'Malgun Gothic','맑은 고딕',sans-serif;backgr
   border:1px solid rgba(30,40,80,.06);border-left:4px solid #64748b;box-shadow:0 1px 2px rgba(30,40,80,.05);transition:box-shadow .12s,transform .12s;}
 .evt:hover{box-shadow:0 4px 10px rgba(30,40,80,.16);transform:translateY(-1px);z-index:7;}
 .evt .et{font-weight:700;color:var(--text);overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;word-break:break-word;}
-.evt .es{font-size:9.5px;color:var(--text-3);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums;}
+.evt .es{font-size:10.5px;color:var(--text-2);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums;}
 .evt .star{color:var(--important);}
 /* 완료 = 성취(초록 체크, 줄긋기 없음) */
 .evt.done .et{color:#137a3a;font-weight:700;}
@@ -2201,6 +2205,11 @@ body{font-family:-apple-system,'Malgun Gothic','맑은 고딕',sans-serif;backgr
 .wb-toast.show{opacity:1;transform:translateY(0);pointer-events:auto;}
 .toast-undo{flex:none;background:#38bdf8;color:#08131f;border:none;border-radius:7px;padding:5px 12px;font-size:12.5px;font-weight:800;cursor:pointer;}
 .toast-undo:hover{background:#7dd3fc;}
+/* ── 반응형: 좁은 화면에서 캘린더가 짜부되지 않게 ── */
+@media (max-width:1240px){ #memo-panel{width:260px;} #sidebar{width:170px;} }
+@media (max-width:1040px){ #memo-panel{display:none;} }
+@media (max-width:820px){ #sidebar{width:132px;} .cal-scroll{overflow-x:auto;} .cal-head,.cal-body{min-width:640px;} .wb-tabbtn{font-size:12px;padding:6px 8px;} }
+@media (max-width:560px){ .page-header{flex-wrap:wrap;} .wb-toast{left:12px;right:12px;max-width:none;} }
 </style>
 </head>
 <body>
