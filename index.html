@@ -339,7 +339,7 @@
       <div id="wb-panel" class="tab-panel"></div>`;
   }
   function wbMount(uid, profile){
-    wbUid=uid; wbProfile=profile||userProfile||{}; wbTab='cal'; wbWeekStart=weekStart();
+    wbUid=uid; wbProfile=profile||userProfile||{}; wbTab='cal'; wbWeekStart=weekStart(); _rtDone.clear();   // 계정 전환 시 자동생성 가드 초기화(새 계정 루틴 반영)
     loadBusinesses().then(renderBizBar).catch(e=>console.error('[WB] businesses',e));
     // 오늘 첫 접속 시 자동 이월 → 그 뒤 실시간 리스너 시작
     runCarryover(uid, today()).catch(e=>console.error('[WB] carryover',e)).finally(()=>wbStartRealtime(uid));
@@ -391,7 +391,7 @@
     renderBossMsgBanner(wbCache.daily);
     updateTabCounts();
     wbDetectNotify();
-    try{ ensureRoutineSlots(wbUid||currentUser.uid, today()); }catch(e){}
+    try{ ensureRoutineSlots(wbUid, today()); }catch(e){}
     const p=$('wb-panel'); if(!p) return;
     // 입력 중이면 재렌더 보류(캘린더는 즉시 반영)
     const ae=document.activeElement; const focused=p.contains(ae)&&/INPUT|TEXTAREA/.test((ae&&ae.tagName)||'');
@@ -1598,30 +1598,34 @@
   window.deleteRoutine = async (rid, uid) => { if(!confirm('삭제할까요?')) return; await deleteDoc(doc(db,"routines",rid)); openRoutineManager(uid); if($('routines-box')) loadRoutinesChecklist(uid,'routines-box',today()); };
 
   // ── 시간 있는 필수업무 → 오늘 진행중·캘린더 자동 등록 ──
-  let _rtEnsuring=false;
+  let _rtEnsuring=false; const _rtDone=new Set();   // 세션당 처리 완료한 (날짜_uid_루틴) — 무한 재쓰기(깜빡임) 방지
   async function ensureRoutineSlots(uid, dateStr){
-    if(_rtEnsuring || !uid || !currentUser || uid!==currentUser.uid) return; // 내 계정에서만 자동 생성
+    if(_rtEnsuring || !uid) return;   // 보고 있는 계정(wbUid)에 대해 생성 — 관리자가 직원 화면을 봐도 그 직원 루틴이 캘린더에 뜨게
     const routines=(wbCache.routines||[]).filter(r=>r.active!==false && r.time && (r.targetUid==='all'||r.targetUid===uid));
     if(!routines.length) return;
     const skipped=new Set(((wbCache.daily&&wbCache.daily.routineSlotsSkipped)||[]));
     const byId=new Map((wbCache.slots||[]).filter(s=>s.date===dateStr).map(s=>[s.id,s]));
-    const ops=[];   // [id, data]
+    const ops=[];   // [key, id, data]
     routines.forEach(r=>{
-      if(skipped.has(r.id)) return;
+      const key=dateStr+'_'+uid+'_'+r.id;
+      if(_rtDone.has(key)) return;                 // 이미 이 세션에서 처리함 → 다시 안 씀(핵심: 캐시에 반영이 안 돼도 재쓰기 루프 없음)
+      if(skipped.has(r.id)){ _rtDone.add(key); return; }
       const id=`${uid}_${dateStr}_rt_${r.id}`;
       const cur=byId.get(id);
       if(!cur){
         let en=r.endTime||''; if(!en){ const m=toMin(r.time); if(m!=null) en=minHM(Math.min(m+30,23*60+59)); }
-        ops.push([id, { uid, date:dateStr, title:r.title||'필수 업무', guide:r.guide||'', biz:r.biz||'', category:r.category||'', status:'todo', important:false, startTime:r.time||'', endTime:en, plannedTime:r.time||'', weekStart:weekStart(new Date(dateStr+'T00:00:00')), fromRoutine:r.id, updatedAt:Timestamp.now() }]);
+        ops.push([key, id, { uid, date:dateStr, title:r.title||'필수 업무', guide:r.guide||'', biz:r.biz||'', category:r.category||'', status:'todo', important:false, startTime:r.time||'', endTime:en, plannedTime:r.time||'', weekStart:weekStart(new Date(dateStr+'T00:00:00')), fromRoutine:r.id, updatedAt:Timestamp.now() }]);
       } else if((cur.guide||'')!==(r.guide||'')){
-        ops.push([id, { guide:r.guide||'', updatedAt:Timestamp.now() }]);   // 오늘 이미 생긴 업무에 작업내용 채워넣기(backfill)
+        ops.push([key, id, { guide:r.guide||'', updatedAt:Timestamp.now() }]);   // 오늘 이미 생긴 업무에 작업내용 채워넣기(backfill)
+      } else {
+        _rtDone.add(key);   // 이미 맞음 → 쓰기 없이 완료 표시
       }
     });
     if(!ops.length) return;
     _rtEnsuring=true;
     try{
-      for(const [id,data] of ops){
-        try{ await setDoc(doc(db,"slots",id), data, {merge:true}); }catch(e){ console.error('[WB] ensureRoutineSlots',e); }
+      for(const [key,id,data] of ops){
+        try{ await setDoc(doc(db,"slots",id), data, {merge:true}); _rtDone.add(key); }catch(e){ console.error('[WB] ensureRoutineSlots',e); }
       }
     } finally { _rtEnsuring=false; }
   }
