@@ -40,7 +40,7 @@
   };
   const HOURS = hoursRange();
   const DAYS  = ["월","화","수","목","금","토","일"];
-  const STATUS_LABEL = { done:"완료", wip:"진행중", todo:"대기", skip:"대기" };
+  const STATUS_LABEL = { done:"완료", wip:"진행중", todo:"미완료", skip:"미완료" };
   const SVAR = { done:"var(--success)", wip:"var(--warn)", todo:"var(--text-3)", skip:"var(--text-3)" };
   const toMin = t => { const m=/^(\d{1,2}):(\d{2})/.exec(t||""); return m?(+m[1])*60+(+m[2]):null; };
   const nowHM = () => { const d=new Date(); return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"); };
@@ -80,6 +80,7 @@
   let categories=[]; // 주제(카테고리) 목록 캐시
   const collapsedCats=new Set(); // 접힌 주제 그룹
   const expandedSubs=new Set();  // 하위 단계 펼친 항목
+  const expandedMiss=new Set();  // 미완료 처리 패널 펼친 항목
   const CAT_COLORS=['#4f6bed','#8b5cf6','#0ea5a4','#d97706','#e0567f','#16a34a','#0284c7','#db2777'];
 
   // ── 유틸 ──
@@ -823,7 +824,7 @@
     const st=d.status||'todo'; const timeTxt=(d.startTime||d.plannedTime||'')+(d.endTime?('–'+d.endTime):'');
     showModal(`<div class="modal-title">${esc(d.title)}</div>
       <div class="muted" style="margin-bottom:12px">${d.category&&cm[d.category]?esc(cm[d.category].name)+' · ':''}${esc(timeTxt)}${d.assignedBy?' · 관리자 배정':''}</div>
-      <div class="form-group"><label>상태</label><div class="seg-group modal-seg">${['done','wip','todo'].map(k=>`<button class="seg" data-s="${k}">${k==='todo'?'대기':STATUS_LABEL[k]}</button>`).join('')}</div></div>
+      <div class="form-group"><label>상태</label><div class="seg-group modal-seg">${['done','wip','todo'].map(k=>`<button class="seg" data-s="${k}">${k==='todo'?'미완료':STATUS_LABEL[k]}</button>`).join('')}</div></div>
       <div class="form-group"><label>제목</label><input id="bd-title" class="mini-input" style="width:100%" value="${esc(d.title)}"></div>
       <div class="form-group"><label>프로젝트</label><select id="bd-biz" class="mini-input" style="width:100%">${bizOptions(d.biz||'')}</select></div>
       ${(d.guide||'').trim()?`<div class="form-group"><label>작업 방법 <span class="muted">(필수업무 절차)</span></label><div class="rt-guide" style="margin-top:0">${esc(d.guide)}</div></div>`:''}
@@ -1085,7 +1086,7 @@
     const prev=Object.keys(byDate).sort().reverse();
     if(!prev.length){ await setDoc(dref,{uid,date:dateStr,carryDone:'none',updatedAt:Timestamp.now()},{merge:true}); return; }
     const src=prev[0];
-    const undone=byDate[src].filter(s=>s.title && s.status!=='done');
+    const undone=byDate[src].filter(s=>s.title && s.status!=='done' && s.disposition!=='blocked');   // 진행불가는 이월 제외
     const writes=[];
     for(const s of undone){
       if(carriedIds.has(s.id)) continue; carriedIds.add(s.id);   // 원본 업무 id로 중복 방지(제목 아님 → 같은 제목 2건도 각각 이월)
@@ -1159,8 +1160,27 @@
     const carried=!!t.carriedFrom;
     const subs=t.subtasks||[]; const subDone=subs.filter(s=>s.done).length;
     const expanded=expandedSubs.has(t.id);
-    const row=el('div','task-row status-'+st+(t.important?' task-important':'')+(carried?' carry-item':'')+(st==='done'?' task-done':''));
+    const blocked = st==='todo' && t.disposition==='blocked';
+    const row=el('div','task-row status-'+st+(blocked?' status-blocked':'')+(t.important?' task-important':'')+(carried?' carry-item':'')+(st==='done'?' task-done':''));
     const seg=(s,lbl,cls)=>`<button class="seg ${st===s?'on '+cls:''}" onclick="setTaskStatus('${uid}','${t.id}','${s}')">${lbl}</button>`;
+    // 미완료 처리(이월/진행불가 + 사유)
+    let missBox='';
+    if(st==='todo'){
+      const disp=t.disposition||''; const reason=(t.incompleteReason||'').trim();
+      const open=expandedMiss.has(t.id)||!!disp||!!reason;
+      if(!open){
+        missBox=`<div class="miss-line"><span class="miss-toggle" onclick="toggleMiss('${uid}','${t.id}')">＋ 미완료 사유·처리</span></div>`;
+      } else {
+        missBox=`<div class="miss-panel">
+          <div class="miss-chips">
+            <span class="mc ${disp!=='blocked'?'on':''}" onclick="setDisposition('${uid}','${t.id}','carry')">⏭ 내일 이월</span>
+            <span class="mc stop ${disp==='blocked'?'on':''}" onclick="setDisposition('${uid}','${t.id}','blocked')">⛔ 진행불가</span>
+          </div>
+          <input class="miss-reason" id="miss_${t.id}" placeholder="사유 (왜 못 끝냈는지 · 선택)" value="${escAttr(reason)}" onkeydown="if(event.key==='Enter')this.blur()" onblur="saveReason('${uid}','${t.id}',this.value)">
+          <div class="miss-note">${disp==='blocked'?'진행불가 — 내일로 이월되지 않아요.':'내일 <b>오늘 진행중</b>으로 사유와 함께 넘어가요.'}</div>
+        </div>`;
+      }
+    }
     const subLine = subs.length?`<span class="subline" onclick="toggleSub('${uid}','${t.id}')">🗂 하위 ${subDone}/${subs.length} ${expanded?'▾':'▸'}</span>`:'';
     let subBox='';
     if(subs.length && expanded){
@@ -1174,8 +1194,9 @@
         ${(t.links||[]).length?`<div class="task-links">${linkPills(t.links)}</div>`:''}
         ${t.bossComment?`<div class="boss-inline">👑 ${esc(t.bossComment)}</div>`:''}
         ${subBox}
+        ${missBox}
       </div>
-      <div class="seg-group">${seg('done','완료','seg-done')}${seg('wip','진행','seg-wip')}${seg('todo','대기','seg-todo')}</div>
+      <div class="seg-group">${seg('done','완료','seg-done')}${seg('wip','진행','seg-wip')}${seg('todo','미완료','seg-todo')}</div>
       <span class="more" onclick="openTaskDetail('${uid}','${t.id}')" title="상세">⋯</span>`;
     return row;
   }
@@ -1189,11 +1210,17 @@
   };
   window.setTaskStatus = async (uid, id, status) => {
     const t=todayTasks.find(x=>x.id===id); if(!t) return;
-    t.status=status; renderTaskList(uid);
+    t.status=status; if(status==='todo') expandedMiss.add(id); else expandedMiss.delete(id);   // 미완료 고르면 처리 패널 펼침
+    renderTaskList(uid);
     await setDoc(doc(db,"slots",id),{status,updatedAt:Timestamp.now()},{merge:true});
     if(t.fromRoutine) mirrorRoutineDone(t.fromRoutine, t.uid||uid, status==='done');
     syncGoals(uid);
   };
+  window.toggleMiss = (uid,id)=>{ expandedMiss.has(id)?expandedMiss.delete(id):expandedMiss.add(id); renderTaskList(uid); };
+  window.setDisposition = async (uid,id,kind)=>{ const t=todayTasks.find(x=>x.id===id); if(t) t.disposition=kind; expandedMiss.add(id); renderTaskList(uid);
+    try{ await setDoc(doc(db,"slots",id),{disposition:kind,updatedAt:Timestamp.now()},{merge:true}); }catch(e){ alert(fbErr(e)); } };
+  window.saveReason = async (uid,id,val)=>{ const v=(val||'').trim(); const t=todayTasks.find(x=>x.id===id); if(t) t.incompleteReason=v;
+    try{ await setDoc(doc(db,"slots",id),{incompleteReason:v,updatedAt:Timestamp.now()},{merge:true}); }catch(e){ alert(fbErr(e)); } };
   window.resolveHelp = async (uid, id) => {
     if(!confirm('이 도움요청을 해결 처리할까요?')) return;
     const t=todayTasks.find(x=>x.id===id); if(t){ t.needsHelp=false; t.helpResolved=true; }
@@ -1616,7 +1643,7 @@
       showModal(`
         <div class="modal-title">시간별 업무 — ${date} ${hour}</div>
         <div class="form-group"><label>업무 내용</label><input id="s-title" class="mini-input" style="width:100%" value="${esc(d.title)}"></div>
-        <div class="form-group"><label>상태</label><div class="seg-group modal-seg">${['done','wip','todo'].map(k=>`<button class="seg" data-s="${k}">${k==='todo'?'대기':STATUS_LABEL[k]}</button>`).join('')}</div></div>
+        <div class="form-group"><label>상태</label><div class="seg-group modal-seg">${['done','wip','todo'].map(k=>`<button class="seg" data-s="${k}">${k==='todo'?'미완료':STATUS_LABEL[k]}</button>`).join('')}</div></div>
         <div class="form-group"><label>메모 (선택)</label><textarea id="s-memo" class="ta">${esc(d.memo)}</textarea></div>
         <div class="form-group"><label>🔗 관련 링크</label><div id="s-links"></div><button type="button" class="btn btn-ghost" style="margin-top:6px" onclick="addLinkRow()">＋ 링크</button></div>
         ${isOwner?`<div class="form-group help-box"><label class="row" style="gap:6px;cursor:pointer"><input type="checkbox" id="s-help" ${d.needsHelp&&!d.helpResolved?'checked':''}> 🆘 도움요청</label><input id="s-help-note" class="mini-input" style="width:100%;margin-top:6px" placeholder="어디가 어려운지 (선택)" value="${esc(d.helpNote)}"></div>`:''}
@@ -1966,6 +1993,20 @@ body{font-family:-apple-system,'Malgun Gothic','맑은 고딕',sans-serif;backgr
 /* 상태별 카드색(완료/진행/대기 일관) — 완료는 아래 .task-done(초록) */
 .task-row.status-wip{background:rgba(217,119,6,.09);box-shadow:inset 4px 0 0 #d97706;}
 .task-row.status-todo{background:rgba(100,116,139,.07);box-shadow:inset 4px 0 0 #94a3b8;}
+.task-row.status-blocked{background:rgba(226,75,74,.08);box-shadow:inset 4px 0 0 #e24b4a;}
+.miss-line{margin-top:6px;}
+.miss-toggle{font-size:12px;color:var(--text-3);cursor:pointer;}
+.miss-toggle:hover{color:var(--accent);}
+.miss-panel{margin-top:8px;padding:10px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;}
+.miss-chips{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;}
+.mc{font-size:12px;padding:5px 11px;border-radius:8px;border:1px solid var(--border-strong);color:var(--text-2);cursor:pointer;}
+.mc.on{background:var(--accent-bg);color:var(--accent-text);border-color:transparent;font-weight:600;}
+.mc.stop.on{background:#fde8e8;color:#b42318;border-color:transparent;}
+.miss-reason{width:100%;border:1px solid var(--border);border-radius:8px;padding:7px 10px;font-size:13px;background:var(--surface-2);color:var(--text);outline:none;}
+.miss-reason:focus{border-color:var(--accent);}
+.miss-note{font-size:11px;color:var(--text-3);margin-top:6px;}
+.miss-tag{font-size:11px;padding:1px 8px;border-radius:999px;background:var(--accent-bg);color:var(--accent-text);}
+.miss-tag.stop{background:#fde8e8;color:#b42318;}
 /* 완료 = 성취(초록 강조, 줄긋기 없음) */
 .task-row.task-done{background:rgba(22,163,74,.08);box-shadow:inset 4px 0 0 #16a34a;}
 .task-row.task-done .task-title{text-decoration:none;color:#137a3a;font-weight:700;}
