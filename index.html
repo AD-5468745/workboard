@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- WorkBoard build 2026-07-05aa (오늘진행중 깜빡임 근본수정: 목록만 원자갱신+경쟁토큰 / 필수업무 오늘+앞으로 자동생성 · 요일지정(매일·특정요일)) -->
+<!-- WorkBoard build 2026-07-08a (오늘 할 일 추가 중복 근본수정: 낙관적추가 id 중복가드 addTask/applyOrganize + renderTaskList id 유니크) -->
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
@@ -1163,7 +1163,8 @@
   }
   function renderTaskList(uid){
     const box=$('task-list'); if(!box) return;
-    let tlist=todayTasks.filter(bizMatch);   // 선택된 사업만
+    const _seen=new Set();
+    let tlist=todayTasks.filter(t=>{ if(_seen.has(t.id)) return false; _seen.add(t.id); return true; }).filter(bizMatch);   // 같은 id 중복 제거(이중 안전장치) + 선택된 사업만
     const hasAny=tlist.length>0;
     const q=(window.__taskQuery||'').trim().toLowerCase();
     if(q) tlist=tlist.filter(t=>(t.title||'').toLowerCase().includes(q)||(t.incompleteReason||'').toLowerCase().includes(q));
@@ -1251,7 +1252,8 @@
     const id=`${uid}_${today()}_${newKey()}`;
     const payload={ uid, date:today(), title, biz:wbBiz||'', status:'todo', important:false, weekStart:weekStart(new Date()), updatedAt:Timestamp.now() };
     await setDoc(doc(db,"slots",id), payload, {merge:true});
-    todayTasks.push({id, ...payload}); inp.value=''; renderTaskList(uid); inp.focus();
+    if(!todayTasks.some(x=>x.id===id)) todayTasks.push({id, ...payload});   // 실시간 리스너가 이미 넣었으면 중복 추가 금지
+    inp.value=''; renderTaskList(uid); inp.focus();
   };
   window.setTaskStatus = async (uid, id, status) => {
     const t=todayTasks.find(x=>x.id===id); if(!t) return;
@@ -1511,7 +1513,7 @@
     for(const it of pendingOrganize.items){
       const id=`${uid}_${dateStr}_${newKey()}`;
       const payload={ uid, date:dateStr, title:it.title, status:it.status==='blocker'?'todo':it.status, important:false, plannedTime:it.hour||'', weekStart:weekStart(new Date(dateStr)), updatedAt:Timestamp.now() };
-      writes.push(setDoc(doc(db,"slots",id),payload,{merge:true})); todayTasks.push({id,...payload});
+      writes.push(setDoc(doc(db,"slots",id),payload,{merge:true})); if(!todayTasks.some(x=>x.id===id)) todayTasks.push({id,...payload});   // 실시간 리스너 중복 방지
     }
     if(pendingOrganize.blocker) writes.push(setDoc(doc(db,"daily",`${uid}_${dateStr}`),{uid,date:dateStr,blocker:pendingOrganize.blocker,updatedAt:Timestamp.now()},{merge:true}));
     await Promise.all(writes);
