@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- WorkBoard build 2026-07-08b2 (재배포 트리거) · 메모장 실시간 공유: onSnapshot 2리스너 id병합 / 읽기·함께편집 권한선택 shareMode / 공유 알림 / 목록만 갱신 입력보호 -->
+<!-- WorkBoard build 2026-07-08c (메모 공유 대상목록: 계정전환 캐시 리셋 + 로드실패 안내) · 08b2: 메모 실시간 공유(onSnapshot 2리스너 id병합/읽기·함께편집 shareMode/공유알림/목록만 갱신 입력보호) -->
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
@@ -211,7 +211,7 @@
     }catch(e){ console.error('[WB] memo notif',e); }
     renderMemoList();   // 목록만 갱신(작성/수정 중 입력칸은 그대로 → 타이핑·커서 안 날아감)
   }
-  let memoEditId=null, memoShareOpen=false, memoUsers=null, memoImages=[];
+  let memoEditId=null, memoShareOpen=false, memoUsers=null, memoUsersError=false, memoImages=[];
   function memoRenderThumbs(){ const box=$('memo-c-imgs'); if(!box) return; box.innerHTML=memoImages.map((src,i)=>`<span class="memo-thumb"><img src="${src}"><span class="memo-thumb-x" onclick="memoRemoveImg(${i})">✕</span></span>`).join(''); }
   window.memoRemoveImg=(i)=>{ memoImages.splice(i,1); memoRenderThumbs(); };
   window.memoViewImg=(el)=>{ const s=el.querySelector('img')&&el.querySelector('img').src; if(s) showModal(`<div style="text-align:center"><img src="${s}" style="max-width:100%;max-height:70vh;border-radius:8px"></div><div class="modal-footer"><button class="btn btn-ghost" onclick="closeModal()">닫기</button></div>`); };
@@ -263,9 +263,13 @@
   window.memoEdit=(id)=>{ const m=memos.find(x=>x.id===id); if(!memoCanEdit(m)){ alert('이 메모를 편집할 권한이 없어요. (읽기 전용 공유)'); return; } memoEditId=id; memoShareOpen=false; memoImages=m?[...(m.images||[])]:[]; renderMemoPanel(); const p=$('memo-panel'); if(p)p.scrollTop=0; };
   window.memoCancelEdit=()=>{ memoEditId=null; memoShareOpen=false; memoImages=[]; renderMemoPanel(); };
   window.memoToggleShare=async()=>{ memoShareOpen=!memoShareOpen;
-    if(memoShareOpen && !memoUsers){ memoUsers=[]; try{ const us=await getDocs(collection(db,"users")); us.forEach(u=>{ if(u.id!==currentUser.uid) memoUsers.push({uid:u.id,name:(u.data().displayName||u.id)}); }); }catch(e){} }
+    if(memoShareOpen && !memoUsers){ memoUsers=[]; memoUsersError=false;
+      try{ const us=await getDocs(collection(db,"users")); us.forEach(u=>{ if(u.id!==currentUser.uid) memoUsers.push({uid:u.id,name:(u.data().displayName||u.id)}); }); }
+      catch(e){ memoUsers=null; memoUsersError=true; console.error('[WB] memo users list',e); }   // 조용한 실패 금지: 다시 시도 가능하게 null + 오류표시
+    }
     const box=$('memo-share-box'); if(box){ box.style.display=memoShareOpen?'block':'none'; if(memoShareOpen) fillMemoShareBox(memoEditId?memos.find(m=>m.id===memoEditId):null); } };
   function fillMemoShareBox(editing){ const box=$('memo-share-box'); if(!box) return; const shared=new Set((editing&&editing.sharedWith)||[]); const mode=(editing&&editing.shareMode)||'read';
+    if(memoUsersError){ box.innerHTML='<div class="muted">공유 대상 목록을 불러오지 못했어요.<br>관리자에게 <b>사용자 목록 읽기 권한</b> 설정을 요청하세요.</div>'; return; }
     if(!(memoUsers&&memoUsers.length)){ box.innerHTML='<div class="muted">공유할 다른 사용자가 없어요.</div>'; return; }
     const modeRow=`<div class="memo-mode-row"><span class="muted" style="margin-right:6px">권한:</span><label class="mode-opt"><input type="radio" name="memo-mode" value="read" ${mode!=='edit'?'checked':''}> 읽기 전용</label><label class="mode-opt"><input type="radio" name="memo-mode" value="edit" ${mode==='edit'?'checked':''}> 함께 편집</label></div>`;
     box.innerHTML=modeRow+'<div class="muted" style="margin:4px 0">함께 볼 사람 선택</div>'+memoUsers.map(u=>`<label class="share-row"><input type="checkbox" class="share-ck" value="${u.uid}" ${shared.has(u.uid)?'checked':''}> ${esc(u.name)}</label>`).join(''); }
@@ -310,7 +314,7 @@
   }
 
   // ── 화면 전환 ──
-  function resetAppUI(){ unsubListeners.forEach(u=>{try{u();}catch(e){}}); unsubListeners=[]; try{stopMemoRealtime();}catch(e){} memos=[]; memoEditId=null; memoShareOpen=false; memoImages=[]; selectedStaffUid=null; todayTasks=[]; if($('sidebar'))$('sidebar').innerHTML=''; if($('main-content'))$('main-content').innerHTML=''; if($('memo-panel'))$('memo-panel').innerHTML=''; }
+  function resetAppUI(){ unsubListeners.forEach(u=>{try{u();}catch(e){}}); unsubListeners=[]; try{stopMemoRealtime();}catch(e){} memos=[]; memoEditId=null; memoShareOpen=false; memoImages=[]; memoUsers=null; memoUsersError=false; selectedStaffUid=null; todayTasks=[]; if($('sidebar'))$('sidebar').innerHTML=''; if($('main-content'))$('main-content').innerHTML=''; if($('memo-panel'))$('memo-panel').innerHTML=''; }
   function showLogin(){ resetAppUI(); $('login-screen').style.display='flex'; $('app-screen').style.display='none'; }
   function showApp(){
     resetAppUI();
