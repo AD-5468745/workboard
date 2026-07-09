@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- WorkBoard build 2026-07-08a (오늘 할 일 추가 중복 근본수정: 낙관적추가 id 중복가드 addTask/applyOrganize + renderTaskList id 유니크) -->
+<!-- WorkBoard build 2026-07-08b (메모장 실시간 공유: onSnapshot 2리스너 id병합 / 읽기·함께편집 권한선택 shareMode / 공유 알림 / 목록만 갱신 입력보호) -->
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
@@ -177,15 +177,39 @@
   //  오른쪽 메모장 (개인 + 지정 공유)
   // ══════════════════════════════════════
   let memos=[]; let memoCat='';
-  async function loadMemos(){
-    const uid=currentUser.uid; const map=new Map();
-    try{
-      const mine=await getDocs(query(collection(db,"memos"),where("owner","==",uid)));
-      mine.forEach(d=>map.set(d.id,{id:d.id,...d.data()}));
-      const shared=await getDocs(query(collection(db,"memos"),where("sharedWith","array-contains",uid)));
-      shared.forEach(d=>{ if(!map.has(d.id)) map.set(d.id,{id:d.id,...d.data()}); });
-    }catch(e){ console.error('[WB] memos',e); }
+  // ── 메모 실시간 구독(내 메모 + 공유받은 메모). 유령중복 방지: id 키로 병합 / 작성칸은 안 건드리고 목록만 갱신 ──
+  let _memoMine=new Map(), _memoShared=new Map(), _memoUnsubs=[], _memoNotifSeen=new Set(), _memoNotifReadyAt=0;
+  function mergeMemos(){
+    const map=new Map();
+    _memoMine.forEach((v,k)=>map.set(k,v));
+    _memoShared.forEach((v,k)=>{ if(!map.has(k)) map.set(k,v); });   // 같은 id는 1건만(내 것 우선) → 중복 방지
     memos=[...map.values()].sort((a,b)=>((b.updatedAt&&b.updatedAt.seconds)||0)-((a.updatedAt&&a.updatedAt.seconds)||0));
+  }
+  function stopMemoRealtime(){ _memoUnsubs.forEach(u=>{try{u();}catch(e){}}); _memoUnsubs=[]; _memoMine=new Map(); _memoShared=new Map(); }
+  function startMemoRealtime(){
+    stopMemoRealtime(); if(!currentUser) return; const uid=currentUser.uid;
+    _memoNotifSeen=new Set(); _memoNotifReadyAt=Date.now()+1500;   // 접속 직후 기존 공유는 알림 스팸 방지
+    try{
+      _memoUnsubs.push(onSnapshot(query(collection(db,"memos"),where("owner","==",uid)),
+        s=>{ _memoMine=new Map(); s.forEach(d=>_memoMine.set(d.id,{id:d.id,...d.data()})); onMemoData(); },
+        e=>{ console.error('[WB] memos mine',e); }));
+      _memoUnsubs.push(onSnapshot(query(collection(db,"memos"),where("sharedWith","array-contains",uid)),
+        s=>{ _memoShared=new Map(); s.forEach(d=>_memoShared.set(d.id,{id:d.id,...d.data()})); onMemoData(); },
+        e=>{ console.error('[WB] memos shared',e); }));
+    }catch(e){ console.error('[WB] memo realtime',e); }
+  }
+  function onMemoData(){
+    mergeMemos();
+    try{   // 새로 공유받은 메모 → 알림(🔔). 접속 직후(readyAt 이전)엔 조용히.
+      const uid=currentUser.uid;
+      const sharedNow=memos.filter(m=>m.owner!==uid && (m.sharedWith||[]).includes(uid));
+      const fresh=sharedNow.filter(m=>!_memoNotifSeen.has(m.id));
+      _memoNotifSeen=new Set(sharedNow.map(m=>m.id));   // 지금 공유중인 것만 기억 → 해제 후 재공유 시 재알림
+      if(Date.now()>=_memoNotifReadyAt && typeof pushNotif==='function'){
+        fresh.forEach(m=>pushNotif({ key:'memo:'+m.id, kind:'memo', task:'📝 메모 공유', who:m.ownerName||'동료', text:m.title||'(제목 없음)', at:Math.floor(((m.updatedAt&&m.updatedAt.seconds))||(Date.now()/1000)), memoId:m.id }));
+      }
+    }catch(e){ console.error('[WB] memo notif',e); }
+    renderMemoList();   // 목록만 갱신(작성/수정 중 입력칸은 그대로 → 타이핑·커서 안 날아감)
   }
   let memoEditId=null, memoShareOpen=false, memoUsers=null, memoImages=[];
   function memoRenderThumbs(){ const box=$('memo-c-imgs'); if(!box) return; box.innerHTML=memoImages.map((src,i)=>`<span class="memo-thumb"><img src="${src}"><span class="memo-thumb-x" onclick="memoRemoveImg(${i})">✕</span></span>`).join(''); }
@@ -194,43 +218,57 @@
   async function memoCompress(blob){ return new Promise((resolve)=>{ const img=new Image(); const url=URL.createObjectURL(blob); img.onload=()=>{ URL.revokeObjectURL(url); const max=1000; let w=img.width,h=img.height; if(w>max){ h=Math.round(h*max/w); w=max; } const c=document.createElement('canvas'); c.width=w; c.height=h; c.getContext('2d').drawImage(img,0,0,w,h); try{ resolve(c.toDataURL('image/jpeg',0.72)); }catch(e){ resolve(null); } }; img.onerror=()=>{ URL.revokeObjectURL(url); resolve(null); }; img.src=url; }); }
   function memoAttachPaste(){ const ta=$('memo-c-body'); if(!ta||ta.__pb) return; ta.__pb=true; ta.addEventListener('paste', async (e)=>{ const items=(e.clipboardData&&e.clipboardData.items)||[]; for(const it of items){ if(it.type&&it.type.indexOf('image')===0){ e.preventDefault(); const blob=it.getAsFile(); if(blob){ const data=await memoCompress(blob); if(data){ memoImages.push(data); memoRenderThumbs(); } } } } }); }
   function fbErr(e){ const c=(e&&e.code)||''; if(c.indexOf('permission-denied')>=0) return '저장 권한이 없습니다.\n\n(Firestore 보안 규칙에서 memos·businesses 컬렉션 저장을 허용해야 합니다 — 관리자 설정 필요.)'; return '저장 실패: '+((e&&e.message)||c||'알 수 없는 오류'); }
-  async function renderMemoPanel(){
+  function memoCanEdit(m){ return !!m && (m.owner===currentUser.uid || ((m.sharedWith||[]).includes(currentUser.uid) && m.shareMode==='edit')); }
+  function renderMemoPanel(){
     const p=$('memo-panel'); if(!p) return; p.classList.remove('hidden');
-    await loadMemos();
-    const cats=[...new Set(memos.map(m=>(m.category||'').trim()).filter(Boolean))];
-    if(memoCat && !cats.includes(memoCat)) memoCat='';
-    const list=memos.filter(m=>!memoCat || (m.category||'')===memoCat);
     const editing = memoEditId ? memos.find(m=>m.id===memoEditId) : null;
-    const catChips=`<span class="memo-cat${memoCat===''?' active':''}" onclick="memoSetCat('')">전체</span>`+cats.map(c=>`<span class="memo-cat${memoCat===c?' active':''}" onclick="memoSetCat('${encodeURIComponent(c)}')">${esc(c)}</span>`).join('');
-    const card=(m)=>{ const shared=(m.sharedWith||[]).length; const mine=m.owner===currentUser.uid;
-      return `<div class="memo-card"><div class="mc-top"><div style="flex:1"><div class="mc-title">${esc(m.title||'(제목 없음)')}</div>${m.category?`<span class="mc-cat">${esc(m.category)}</span>`:''}</div></div>
-        ${(m.body||'').trim()?`<div class="mc-body">${esc(m.body||'')}</div>`:''}
-        ${(m.images||[]).length?`<div class="memo-imgs">${(m.images||[]).map(src=>`<span class="memo-thumb" onclick="memoViewImg(this)"><img src="${src}"></span>`).join('')}</div>`:''}
-        ${shared?`<div class="mc-share">🔗 ${mine?'공유 중':('공유받음 · '+esc(m.ownerName||''))} · ${shared}명</div>`:''}
-        <div class="mc-actions"><button class="mc-btn copy" onclick="copyMemo('${m.id}')">📋 복사</button>${mine?`<button class="mc-btn" onclick="memoEdit('${m.id}')">수정</button><button class="mc-btn" onclick="deleteMemo('${m.id}')">삭제</button>`:''}</div></div>`;
-    };
+    const isOwnerCompose = !editing || editing.owner===currentUser.uid;   // 새 메모=내 것 / 공유받아 편집 중이면 공유설정은 숨김(작성자만)
     const editShare=(editing&&(editing.sharedWith||[]).length)||0;
     const composer=`<div class="memo-compose">
-      ${editing?`<div class="memo-editing">✏️ 수정 중 · <span class="link-btn" onclick="memoCancelEdit()">＋ 새 메모로</span></div>`:''}
+      ${editing?`<div class="memo-editing">✏️ ${editing.owner===currentUser.uid?'수정 중':('공유 메모 편집 중 · '+esc(editing.ownerName||''))} · <span class="link-btn" onclick="memoCancelEdit()">＋ 새 메모로</span></div>`:''}
       <input id="memo-c-cat" class="mini-input" style="width:100%;margin-bottom:6px" placeholder="카테고리 (선택 · 예: 인사말)" value="${esc(editing?(editing.category||''):'')}">
       <input id="memo-c-title" class="mini-input" style="width:100%;margin-bottom:6px" placeholder="제목 (선택)" value="${esc(editing?(editing.title||''):'')}">
       <textarea id="memo-c-body" class="ta" style="height:66px" placeholder="복붙할 내용을 여기 바로 입력하세요">${esc(editing?(editing.body||''):'')}</textarea>
       <div class="memo-imgs" id="memo-c-imgs"></div>
       <div class="muted" style="font-size:10.5px;margin-top:3px">📎 스크린샷·이미지는 위 내용칸에 <b>Ctrl+V</b>로 붙여넣기</div>
-      <div class="memo-compose-row"><span class="link-btn" onclick="memoToggleShare()">🔗 공유${editShare?' ('+editShare+')':''}</span><button class="btn btn-primary" style="padding:5px 12px" onclick="memoQuickSave()">${editing?'수정 저장':'＋ 저장'}</button></div>
-      <div id="memo-share-box" class="share-list" style="display:${memoShareOpen?'block':'none'};margin-top:8px"></div>
+      <div class="memo-compose-row">${isOwnerCompose?`<span class="link-btn" onclick="memoToggleShare()">🔗 공유${editShare?' ('+editShare+')':''}</span>`:'<span class="muted" style="font-size:11px">🔗 공유 설정은 작성자만 바꿀 수 있어요</span>'}<button class="btn btn-primary" style="padding:5px 12px" onclick="memoQuickSave()">${editing?'수정 저장':'＋ 저장'}</button></div>
+      ${isOwnerCompose?`<div id="memo-share-box" class="share-list" style="display:${memoShareOpen?'block':'none'};margin-top:8px"></div>`:''}
     </div>`;
-    p.innerHTML=`<div class="memo-head"><span class="memo-title">📝 메모장</span></div>${composer}<div class="memo-cats">${catChips}</div>${list.length?list.map(card).join(''):'<div class="memo-empty">아직 메모가 없어요.<br>위에 바로 적고 ＋저장 하세요.</div>'}`;
-    if(memoShareOpen) fillMemoShareBox(editing);
+    p.innerHTML=`<div class="memo-head"><span class="memo-title">📝 메모장</span></div>${composer}<div id="memo-body"></div>`;
+    renderMemoList();
+    if(memoShareOpen && isOwnerCompose) fillMemoShareBox(editing);
     memoRenderThumbs(); memoAttachPaste();
   }
-  window.memoSetCat=(c)=>{ memoCat=decodeURIComponent(c); renderMemoPanel(); };
-  window.memoEdit=(id)=>{ memoEditId=id; memoShareOpen=false; const m=memos.find(x=>x.id===id); memoImages=m?[...(m.images||[])]:[]; renderMemoPanel(); const p=$('memo-panel'); if(p)p.scrollTop=0; };
+  // 목록만 다시 그림(작성칸 보호) — 실시간 갱신·카테고리 필터에서 호출
+  function renderMemoList(){
+    const body=$('memo-body'); if(!body) return;
+    const cats=[...new Set(memos.map(m=>(m.category||'').trim()).filter(Boolean))];
+    if(memoCat && !cats.includes(memoCat)) memoCat='';
+    const _seen=new Set();
+    const list=memos.filter(m=>{ if(_seen.has(m.id)) return false; _seen.add(m.id); return true; }).filter(m=>!memoCat || (m.category||'')===memoCat);   // id 중복 제거(이중 안전장치)
+    const catChips=`<span class="memo-cat${memoCat===''?' active':''}" onclick="memoSetCat('')">전체</span>`+cats.map(c=>`<span class="memo-cat${memoCat===c?' active':''}" onclick="memoSetCat('${encodeURIComponent(c)}')">${esc(c)}</span>`).join('');
+    const card=(m)=>{ const shared=(m.sharedWith||[]).length; const mine=m.owner===currentUser.uid; const canEdit=memoCanEdit(m);
+      const badge = mine
+        ? (shared?`<div class="mc-share">🔗 공유 중 · ${shared}명${m.shareMode==='edit'?' · ✏️ 함께 편집':' · 읽기'}</div>`:'')
+        : `<div class="mc-share">📥 ${esc(m.ownerName||'동료')} 공유 · ${m.shareMode==='edit'?'✏️ 함께 편집':'읽기'}</div>`;
+      return `<div class="memo-card"><div class="mc-top"><div style="flex:1"><div class="mc-title">${esc(m.title||'(제목 없음)')}</div>${m.category?`<span class="mc-cat">${esc(m.category)}</span>`:''}</div></div>
+        ${(m.body||'').trim()?`<div class="mc-body">${esc(m.body||'')}</div>`:''}
+        ${(m.images||[]).length?`<div class="memo-imgs">${(m.images||[]).map(src=>`<span class="memo-thumb" onclick="memoViewImg(this)"><img src="${src}"></span>`).join('')}</div>`:''}
+        ${badge}
+        <div class="mc-actions"><button class="mc-btn copy" onclick="copyMemo('${m.id}')">📋 복사</button>${canEdit?`<button class="mc-btn" onclick="memoEdit('${m.id}')">수정</button>`:''}${mine?`<button class="mc-btn" onclick="deleteMemo('${m.id}')">삭제</button>`:''}</div></div>`;
+    };
+    body.innerHTML=`<div class="memo-cats">${catChips}</div>${list.length?list.map(card).join(''):'<div class="memo-empty">아직 메모가 없어요.<br>위에 바로 적고 ＋저장 하세요.</div>'}`;
+  }
+  window.memoSetCat=(c)=>{ memoCat=decodeURIComponent(c); renderMemoList(); };   // 필터는 목록만 갱신(작성칸 보호)
+  window.memoEdit=(id)=>{ const m=memos.find(x=>x.id===id); if(!memoCanEdit(m)){ alert('이 메모를 편집할 권한이 없어요. (읽기 전용 공유)'); return; } memoEditId=id; memoShareOpen=false; memoImages=m?[...(m.images||[])]:[]; renderMemoPanel(); const p=$('memo-panel'); if(p)p.scrollTop=0; };
   window.memoCancelEdit=()=>{ memoEditId=null; memoShareOpen=false; memoImages=[]; renderMemoPanel(); };
   window.memoToggleShare=async()=>{ memoShareOpen=!memoShareOpen;
     if(memoShareOpen && !memoUsers){ memoUsers=[]; try{ const us=await getDocs(collection(db,"users")); us.forEach(u=>{ if(u.id!==currentUser.uid) memoUsers.push({uid:u.id,name:(u.data().displayName||u.id)}); }); }catch(e){} }
     const box=$('memo-share-box'); if(box){ box.style.display=memoShareOpen?'block':'none'; if(memoShareOpen) fillMemoShareBox(memoEditId?memos.find(m=>m.id===memoEditId):null); } };
-  function fillMemoShareBox(editing){ const box=$('memo-share-box'); if(!box) return; const shared=new Set((editing&&editing.sharedWith)||[]); box.innerHTML=(memoUsers&&memoUsers.length)?('<div class="muted" style="margin-bottom:4px">함께 볼 사람 선택</div>'+memoUsers.map(u=>`<label class="share-row"><input type="checkbox" class="share-ck" value="${u.uid}" ${shared.has(u.uid)?'checked':''}> ${esc(u.name)}</label>`).join('')):'<div class="muted">공유할 다른 사용자가 없어요.</div>'; }
+  function fillMemoShareBox(editing){ const box=$('memo-share-box'); if(!box) return; const shared=new Set((editing&&editing.sharedWith)||[]); const mode=(editing&&editing.shareMode)||'read';
+    if(!(memoUsers&&memoUsers.length)){ box.innerHTML='<div class="muted">공유할 다른 사용자가 없어요.</div>'; return; }
+    const modeRow=`<div class="memo-mode-row"><span class="muted" style="margin-right:6px">권한:</span><label class="mode-opt"><input type="radio" name="memo-mode" value="read" ${mode!=='edit'?'checked':''}> 읽기 전용</label><label class="mode-opt"><input type="radio" name="memo-mode" value="edit" ${mode==='edit'?'checked':''}> 함께 편집</label></div>`;
+    box.innerHTML=modeRow+'<div class="muted" style="margin:4px 0">함께 볼 사람 선택</div>'+memoUsers.map(u=>`<label class="share-row"><input type="checkbox" class="share-ck" value="${u.uid}" ${shared.has(u.uid)?'checked':''}> ${esc(u.name)}</label>`).join(''); }
   window.copyMemo=async(id)=>{ const m=memos.find(x=>x.id===id); if(!m) return; const txt=m.body||'';
     try{ await navigator.clipboard.writeText(txt); }catch(e){ const ta=document.createElement('textarea'); ta.value=txt; document.body.appendChild(ta); ta.select(); try{document.execCommand('copy');}catch(_){} ta.remove(); }
     alert('복사됐어요.'); };
@@ -238,17 +276,25 @@
     const title=($('memo-c-title')?.value||'').trim(), body=($('memo-c-body')?.value||''), category=($('memo-c-cat')?.value||'').trim();
     if(!title && !body.trim() && !memoImages.length){ alert('내용이나 이미지를 입력하세요'); return; }
     const editing = memoEditId ? memos.find(m=>m.id===memoEditId) : null;
-    let sharedWith; if(memoShareOpen){ sharedWith=[...document.querySelectorAll('#memo-share-box .share-ck:checked')].map(c=>c.value); } else { sharedWith = editing ? (editing.sharedWith||[]) : []; }
-    const payload={ owner:currentUser.uid, ownerName:(userProfile&&userProfile.displayName)||'', title, body, category, sharedWith, images:memoImages.slice(), updatedAt:Timestamp.now() };
     try{
-      if(memoEditId){ await setDoc(doc(db,"memos",memoEditId),payload,{merge:true}); }
-      else { payload.createdAt=Timestamp.now(); await addDoc(collection(db,"memos"),payload); }
+      if(editing && editing.owner!==currentUser.uid){
+        // 공유받아 '함께 편집' 중 — 내용만 저장(공유 설정·작성자는 안 건드림)
+        if(!memoCanEdit(editing)){ alert('이 메모를 편집할 권한이 없어요.'); return; }
+        await setDoc(doc(db,"memos",memoEditId),{ title, body, category, images:memoImages.slice(), lastEditBy:currentUser.uid, lastEditName:(userProfile&&userProfile.displayName)||'', updatedAt:Timestamp.now() },{merge:true});
+      }else{
+        let sharedWith, shareMode;
+        if(memoShareOpen){ sharedWith=[...document.querySelectorAll('#memo-share-box .share-ck:checked')].map(c=>c.value); shareMode=(document.querySelector('#memo-share-box input[name="memo-mode"]:checked')||{}).value||'read'; }
+        else { sharedWith = editing ? (editing.sharedWith||[]) : []; shareMode = editing ? (editing.shareMode||'read') : 'read'; }
+        const payload={ owner:currentUser.uid, ownerName:(userProfile&&userProfile.displayName)||'', title, body, category, sharedWith, shareMode, images:memoImages.slice(), updatedAt:Timestamp.now() };
+        if(memoEditId){ await setDoc(doc(db,"memos",memoEditId),payload,{merge:true}); }
+        else { payload.createdAt=Timestamp.now(); await addDoc(collection(db,"memos"),payload); }
+      }
       memoEditId=null; memoShareOpen=false; memoImages=[]; renderMemoPanel();
     }catch(e){ alert(fbErr(e)); }
   };
   window.deleteMemo=async(id)=>{ if(!confirm('이 메모를 삭제할까요?')) return;
     const m=memos.find(x=>x.id===id); const data=m?{...m}:null; if(data) delete data.id;
-    try{ await deleteDoc(doc(db,"memos",id)); renderMemoPanel(); }catch(e){ alert(fbErr(e)); return; }
+    try{ await deleteDoc(doc(db,"memos",id)); memos=memos.filter(x=>x.id!==id); renderMemoPanel(); }catch(e){ alert(fbErr(e)); return; }
     if(data) showToast('메모를 삭제했어요', '실행취소', async()=>{ try{ await setDoc(doc(db,"memos",id), {...data, updatedAt:Timestamp.now()}); renderMemoPanel(); showToast('되돌렸어요'); }catch(e){ alert(fbErr(e)); } });
   };
   // 메모장 폭 조절(왼쪽 막대 드래그) + 저장
@@ -264,7 +310,7 @@
   }
 
   // ── 화면 전환 ──
-  function resetAppUI(){ unsubListeners.forEach(u=>{try{u();}catch(e){}}); unsubListeners=[]; selectedStaffUid=null; todayTasks=[]; if($('sidebar'))$('sidebar').innerHTML=''; if($('main-content'))$('main-content').innerHTML=''; if($('memo-panel'))$('memo-panel').innerHTML=''; }
+  function resetAppUI(){ unsubListeners.forEach(u=>{try{u();}catch(e){}}); unsubListeners=[]; try{stopMemoRealtime();}catch(e){} memos=[]; memoEditId=null; memoShareOpen=false; memoImages=[]; selectedStaffUid=null; todayTasks=[]; if($('sidebar'))$('sidebar').innerHTML=''; if($('main-content'))$('main-content').innerHTML=''; if($('memo-panel'))$('memo-panel').innerHTML=''; }
   function showLogin(){ resetAppUI(); $('login-screen').style.display='flex'; $('app-screen').style.display='none'; }
   function showApp(){
     resetAppUI();
@@ -274,7 +320,7 @@
     $('role-badge').textContent=userRole==='boss'?'관리자':'직원';
     $('role-badge').className='role-badge '+(userRole==='boss'?'boss':'');
     if(userRole==='boss') renderBossView(); else renderStaffView(currentUser.uid);
-    renderMemoPanel(); setupMemoResize();
+    renderMemoPanel(); startMemoRealtime(); setupMemoResize();
   }
 
   // ══════════════════════════════════════
@@ -439,7 +485,7 @@
     const fresh=[]; curMap.forEach((v,k)=>{ if(!_notifSeen.has(k)) fresh.push(v); });
     _notifSeen = new Set(curMap.keys());   // 현재 존재하는 것만 기억 → 삭제됐다 다시 오면 재알림
     // 리스트 동기화: 사라진(삭제된) 항목 제거 + 남은 항목 최신 내용으로 갱신 (시작알림은 데이터기반이 아니므로 보존)
-    _notifList = _notifList.filter(it=> it.kind==='start' || curMap.has(it.key)).map(it=> it.kind==='start' ? it : Object.assign({}, it, curMap.get(it.key)));
+    _notifList = _notifList.filter(it=> it.kind==='start' || it.kind==='memo' || curMap.has(it.key)).map(it=> (it.kind==='start'||it.kind==='memo') ? it : Object.assign({}, it, curMap.get(it.key)));   // start·memo는 slots/daily 기반이 아니므로 보존
     if(Date.now()>=_notifReadyAt){ fresh.sort((a,b)=>a.at-b.at).forEach(pushNotif); }
     renderNotifBell(); if(_notifOpen){ const p=$('notif-panel'); if(p) p.innerHTML=notifPanelHTML(); }
   }
@@ -455,7 +501,9 @@
   window.toggleNotifPanel=()=>{ const p=$('notif-panel'); if(!p) return; _notifOpen=!_notifOpen; if(_notifOpen){ _notifUnread=0; renderNotifBell(); p.innerHTML=notifPanelHTML(); p.style.display='block'; } else p.style.display='none'; };
   window.openNotif=(key)=>{
     const it=_notifList.find(x=>x.key===key); _notifOpen=false; const p=$('notif-panel'); if(p)p.style.display='none';
-    if(!it) return; const uid=it.uid||wbUid||currentUser.uid;
+    if(!it) return;
+    if(it.kind==='memo'){ const mp=$('memo-panel'); if(mp){ mp.classList.remove('hidden'); memoCat=''; renderMemoPanel(); mp.scrollTop=0; } return; }   // 메모 공유 → 메모장 열기
+    const uid=it.uid||wbUid||currentUser.uid;
     if(it.kind==='chat'||it.kind==='start'){ openBlockDetail(uid, it.slotId); }   // 대화·시작알림 → 그 업무 열기
     else { openDailyChat(uid); }   // 지시·대화 → 관리자↔직원 대화창(그 자리에서 답장)
   };
@@ -464,7 +512,7 @@
   function notifPanelHTML(){
     const on=(typeof Notification!=='undefined') && Notification.permission==='granted' && localStorage.getItem('wbNotifBrowser')==='1';
     const soundOn=localStorage.getItem('wbNotifSound')!=='0';
-    const ic={chat:'💬',order:'📣',thread:'💬',start:'⏰'};
+    const ic={chat:'💬',order:'📣',thread:'💬',start:'⏰',memo:'📝'};
     const items=_notifList.length?_notifList.map(x=>{ const t=x.at?new Date(x.at*1000):null; const tt=t?`${t.getMonth()+1}/${t.getDate()} ${String(t.getHours()).padStart(2,'0')}:${String(t.getMinutes()).padStart(2,'0')}`:''; return `<div class="nt-row" onclick="openNotif('${x.key}')"><div class="nt-task">${ic[x.kind]||'🔔'} ${esc(x.task)} <span class="nt-go">열기 ›</span></div><div class="nt-text">${esc(x.who)}: ${esc(x.text||'')}</div><div class="nt-meta">${tt}</div></div>`; }).join(''):'<div class="muted" style="padding:16px;text-align:center">새 알림이 없습니다.</div>';
     return `<div class="nt-head"><b>알림</b><span class="nt-opts"><label class="nt-toggle"><input type="checkbox" ${soundOn?'checked':''} onchange="toggleNotifSound(this.checked)"> 소리</label><span class="nt-mini" onclick="notifPreview()">미리듣기</span><label class="nt-toggle"><input type="checkbox" ${on?'checked':''} onchange="toggleBrowserNotif(this.checked)"> 컴퓨터 알림</label></span></div><div class="nt-list">${items}</div>${_notifList.length?'<div class="nt-foot"><span class="nt-mini" onclick="clearNotifs()">모두 지우기</span></div>':''}`;
   }
@@ -2019,8 +2067,10 @@ body{font-family:-apple-system,'Malgun Gothic','맑은 고딕',sans-serif;backgr
 .memo-thumb{position:relative;display:inline-block;width:58px;height:58px;border-radius:7px;overflow:hidden;border:1px solid var(--border);cursor:pointer;background:var(--surface-2);}
 .memo-thumb img{width:100%;height:100%;object-fit:cover;display:block;}
 .memo-thumb .memo-thumb-x{position:absolute;top:1px;right:1px;width:16px;height:16px;line-height:15px;text-align:center;font-size:10px;border-radius:50%;background:rgba(0,0,0,.6);color:#fff;cursor:pointer;}
-.share-list{max-height:150px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:8px;}
+.share-list{max-height:180px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:8px;}
 .share-row{display:flex;align-items:center;gap:8px;padding:4px 2px;font-size:13px;}
+.memo-mode-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding-bottom:6px;margin-bottom:4px;border-bottom:1px dashed var(--border);}
+.mode-opt{display:inline-flex;align-items:center;gap:4px;font-size:12.5px;cursor:pointer;}
 .muted{color:var(--text-3);font-size:12px;}
 .empty{color:var(--text-3);padding:22px;text-align:center;background:var(--surface);border-radius:10px;border:1px dashed var(--border-strong);font-size:13px;}
 .page-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;}
