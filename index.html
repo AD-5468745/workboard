@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- WorkBoard build 2026-07-08c (메모 공유 대상목록: 계정전환 캐시 리셋 + 로드실패 안내) · 08b2: 메모 실시간 공유(onSnapshot 2리스너 id병합/읽기·함께편집 shareMode/공유알림/목록만 갱신 입력보호) -->
+<!-- WorkBoard build 2026-07-08d (공유편집자가 메모 수정 시 소유자에게 알림 memoedit + 카드 '최근수정: ○○' 배지 / 소유자 저장=본인 마지막수정자 오탐방지) · 08c: 공유대상목록 캐시리셋+로드실패안내 · 08b2: 메모 실시간 공유 -->
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
@@ -178,7 +178,7 @@
   // ══════════════════════════════════════
   let memos=[]; let memoCat='';
   // ── 메모 실시간 구독(내 메모 + 공유받은 메모). 유령중복 방지: id 키로 병합 / 작성칸은 안 건드리고 목록만 갱신 ──
-  let _memoMine=new Map(), _memoShared=new Map(), _memoUnsubs=[], _memoNotifSeen=new Set(), _memoNotifReadyAt=0;
+  let _memoMine=new Map(), _memoShared=new Map(), _memoUnsubs=[], _memoNotifSeen=new Set(), _memoEditSeen=new Set(), _memoNotifReadyAt=0;
   function mergeMemos(){
     const map=new Map();
     _memoMine.forEach((v,k)=>map.set(k,v));
@@ -188,7 +188,7 @@
   function stopMemoRealtime(){ _memoUnsubs.forEach(u=>{try{u();}catch(e){}}); _memoUnsubs=[]; _memoMine=new Map(); _memoShared=new Map(); }
   function startMemoRealtime(){
     stopMemoRealtime(); if(!currentUser) return; const uid=currentUser.uid;
-    _memoNotifSeen=new Set(); _memoNotifReadyAt=Date.now()+1500;   // 접속 직후 기존 공유는 알림 스팸 방지
+    _memoNotifSeen=new Set(); _memoEditSeen=new Set(); _memoNotifReadyAt=Date.now()+1500;   // 접속 직후 기존 공유/수정은 알림 스팸 방지
     try{
       _memoUnsubs.push(onSnapshot(query(collection(db,"memos"),where("owner","==",uid)),
         s=>{ _memoMine=new Map(); s.forEach(d=>_memoMine.set(d.id,{id:d.id,...d.data()})); onMemoData(); },
@@ -208,6 +208,14 @@
       if(Date.now()>=_memoNotifReadyAt && typeof pushNotif==='function'){
         fresh.forEach(m=>pushNotif({ key:'memo:'+m.id, kind:'memo', task:'📝 메모 공유', who:m.ownerName||'동료', text:m.title||'(제목 없음)', at:Math.floor(((m.updatedAt&&m.updatedAt.seconds))||(Date.now()/1000)), memoId:m.id }));
       }
+      // 내 메모를 공유편집자가 수정 → 소유자에게 알림(수정 건별 1회)
+      memos.filter(m=>m.owner===uid && m.lastEditBy && m.lastEditBy!==uid).forEach(m=>{
+        const key='memoedit:'+m.id+':'+(((m.updatedAt&&m.updatedAt.seconds))||0);
+        if(_memoEditSeen.has(key)) return; _memoEditSeen.add(key);
+        if(Date.now()>=_memoNotifReadyAt && typeof pushNotif==='function'){
+          pushNotif({ key, kind:'memoedit', task:'✏️ 메모 수정됨', who:m.lastEditName||'동료', text:m.title||'(제목 없음)', at:Math.floor(((m.updatedAt&&m.updatedAt.seconds))||(Date.now()/1000)), memoId:m.id });
+        }
+      });
     }catch(e){ console.error('[WB] memo notif',e); }
     renderMemoList();   // 목록만 갱신(작성/수정 중 입력칸은 그대로 → 타이핑·커서 안 날아감)
   }
@@ -248,8 +256,9 @@
     const list=memos.filter(m=>{ if(_seen.has(m.id)) return false; _seen.add(m.id); return true; }).filter(m=>!memoCat || (m.category||'')===memoCat);   // id 중복 제거(이중 안전장치)
     const catChips=`<span class="memo-cat${memoCat===''?' active':''}" onclick="memoSetCat('')">전체</span>`+cats.map(c=>`<span class="memo-cat${memoCat===c?' active':''}" onclick="memoSetCat('${encodeURIComponent(c)}')">${esc(c)}</span>`).join('');
     const card=(m)=>{ const shared=(m.sharedWith||[]).length; const mine=m.owner===currentUser.uid; const canEdit=memoCanEdit(m);
+      const editedByOther = m.lastEditBy && m.lastEditBy!==m.owner;   // 공유편집자가 마지막으로 수정
       const badge = mine
-        ? (shared?`<div class="mc-share">🔗 공유 중 · ${shared}명${m.shareMode==='edit'?' · ✏️ 함께 편집':' · 읽기'}</div>`:'')
+        ? (shared?`<div class="mc-share">🔗 공유 중 · ${shared}명${m.shareMode==='edit'?' · ✏️ 함께 편집':' · 읽기'}${editedByOther?` · 최근수정: ${esc(m.lastEditName||'동료')}`:''}</div>`:(editedByOther?`<div class="mc-share">✏️ 최근수정: ${esc(m.lastEditName||'동료')}</div>`:''))
         : `<div class="mc-share">📥 ${esc(m.ownerName||'동료')} 공유 · ${m.shareMode==='edit'?'✏️ 함께 편집':'읽기'}</div>`;
       return `<div class="memo-card"><div class="mc-top"><div style="flex:1"><div class="mc-title">${esc(m.title||'(제목 없음)')}</div>${m.category?`<span class="mc-cat">${esc(m.category)}</span>`:''}</div></div>
         ${(m.body||'').trim()?`<div class="mc-body">${esc(m.body||'')}</div>`:''}
@@ -289,7 +298,7 @@
         let sharedWith, shareMode;
         if(memoShareOpen){ sharedWith=[...document.querySelectorAll('#memo-share-box .share-ck:checked')].map(c=>c.value); shareMode=(document.querySelector('#memo-share-box input[name="memo-mode"]:checked')||{}).value||'read'; }
         else { sharedWith = editing ? (editing.sharedWith||[]) : []; shareMode = editing ? (editing.shareMode||'read') : 'read'; }
-        const payload={ owner:currentUser.uid, ownerName:(userProfile&&userProfile.displayName)||'', title, body, category, sharedWith, shareMode, images:memoImages.slice(), updatedAt:Timestamp.now() };
+        const payload={ owner:currentUser.uid, ownerName:(userProfile&&userProfile.displayName)||'', title, body, category, sharedWith, shareMode, images:memoImages.slice(), lastEditBy:currentUser.uid, lastEditName:(userProfile&&userProfile.displayName)||'', updatedAt:Timestamp.now() };   // 소유자 저장=본인이 마지막 수정자(공유편집자 수정 알림 오탐 방지)
         if(memoEditId){ await setDoc(doc(db,"memos",memoEditId),payload,{merge:true}); }
         else { payload.createdAt=Timestamp.now(); await addDoc(collection(db,"memos"),payload); }
       }
@@ -489,7 +498,7 @@
     const fresh=[]; curMap.forEach((v,k)=>{ if(!_notifSeen.has(k)) fresh.push(v); });
     _notifSeen = new Set(curMap.keys());   // 현재 존재하는 것만 기억 → 삭제됐다 다시 오면 재알림
     // 리스트 동기화: 사라진(삭제된) 항목 제거 + 남은 항목 최신 내용으로 갱신 (시작알림은 데이터기반이 아니므로 보존)
-    _notifList = _notifList.filter(it=> it.kind==='start' || it.kind==='memo' || curMap.has(it.key)).map(it=> (it.kind==='start'||it.kind==='memo') ? it : Object.assign({}, it, curMap.get(it.key)));   // start·memo는 slots/daily 기반이 아니므로 보존
+    _notifList = _notifList.filter(it=> it.kind==='start' || it.kind==='memo' || it.kind==='memoedit' || curMap.has(it.key)).map(it=> (it.kind==='start'||it.kind==='memo'||it.kind==='memoedit') ? it : Object.assign({}, it, curMap.get(it.key)));   // start·memo·memoedit는 slots/daily 기반이 아니므로 보존
     if(Date.now()>=_notifReadyAt){ fresh.sort((a,b)=>a.at-b.at).forEach(pushNotif); }
     renderNotifBell(); if(_notifOpen){ const p=$('notif-panel'); if(p) p.innerHTML=notifPanelHTML(); }
   }
@@ -506,7 +515,7 @@
   window.openNotif=(key)=>{
     const it=_notifList.find(x=>x.key===key); _notifOpen=false; const p=$('notif-panel'); if(p)p.style.display='none';
     if(!it) return;
-    if(it.kind==='memo'){ const mp=$('memo-panel'); if(mp){ mp.classList.remove('hidden'); memoCat=''; renderMemoPanel(); mp.scrollTop=0; } return; }   // 메모 공유 → 메모장 열기
+    if(it.kind==='memo'||it.kind==='memoedit'){ const mp=$('memo-panel'); if(mp){ mp.classList.remove('hidden'); memoCat=''; renderMemoPanel(); mp.scrollTop=0; } return; }   // 메모 공유·수정 → 메모장 열기
     const uid=it.uid||wbUid||currentUser.uid;
     if(it.kind==='chat'||it.kind==='start'){ openBlockDetail(uid, it.slotId); }   // 대화·시작알림 → 그 업무 열기
     else { openDailyChat(uid); }   // 지시·대화 → 관리자↔직원 대화창(그 자리에서 답장)
@@ -516,7 +525,7 @@
   function notifPanelHTML(){
     const on=(typeof Notification!=='undefined') && Notification.permission==='granted' && localStorage.getItem('wbNotifBrowser')==='1';
     const soundOn=localStorage.getItem('wbNotifSound')!=='0';
-    const ic={chat:'💬',order:'📣',thread:'💬',start:'⏰',memo:'📝'};
+    const ic={chat:'💬',order:'📣',thread:'💬',start:'⏰',memo:'📝',memoedit:'✏️'};
     const items=_notifList.length?_notifList.map(x=>{ const t=x.at?new Date(x.at*1000):null; const tt=t?`${t.getMonth()+1}/${t.getDate()} ${String(t.getHours()).padStart(2,'0')}:${String(t.getMinutes()).padStart(2,'0')}`:''; return `<div class="nt-row" onclick="openNotif('${x.key}')"><div class="nt-task">${ic[x.kind]||'🔔'} ${esc(x.task)} <span class="nt-go">열기 ›</span></div><div class="nt-text">${esc(x.who)}: ${esc(x.text||'')}</div><div class="nt-meta">${tt}</div></div>`; }).join(''):'<div class="muted" style="padding:16px;text-align:center">새 알림이 없습니다.</div>';
     return `<div class="nt-head"><b>알림</b><span class="nt-opts"><label class="nt-toggle"><input type="checkbox" ${soundOn?'checked':''} onchange="toggleNotifSound(this.checked)"> 소리</label><span class="nt-mini" onclick="notifPreview()">미리듣기</span><label class="nt-toggle"><input type="checkbox" ${on?'checked':''} onchange="toggleBrowserNotif(this.checked)"> 컴퓨터 알림</label></span></div><div class="nt-list">${items}</div>${_notifList.length?'<div class="nt-foot"><span class="nt-mini" onclick="clearNotifs()">모두 지우기</span></div>':''}`;
   }
