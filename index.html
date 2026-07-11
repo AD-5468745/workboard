@@ -346,6 +346,7 @@
   let wbDayDate=null;              // 일(day) 보기에서 보는 날짜
   let wbUid=null;                  // 보고 있는 직원 uid(직원=본인, 관리자=선택 직원)
   let wbProfile=null;              // 보고 있는 직원의 프로필(근무시간 등)
+  let wbReviewDate=null;           // 하루 리뷰 탭이 보고 있는 날짜(기본 오늘, 어제/오늘 이동)
   let wbCache={slots:[], daily:{}, routines:[]};
   const _carryClean=new Set();     // 세션당 (uid_date) 유령 중복 정리 완료 표시 — 반복 접속 시 재읽기 방지
   // 필수업무(일일 고정업무)는 매일 새로 자동생성되므로 '이월' 대상에서 제외한다.
@@ -403,6 +404,7 @@
           <button class="wb-tabbtn" id="wt-fixed" onclick="wbSwitch('fixed')">📌 일일 고정업무 <span class="cnt" id="cnt-fixed"></span></button>
           <button class="wb-tabbtn" id="wt-today" onclick="wbSwitch('today')">▶ 오늘 진행중 <span class="cnt" id="cnt-today"></span></button>
           <button class="wb-tabbtn" id="wt-plan" onclick="wbSwitch('plan')">🌙 내일 계획 <span class="cnt" id="cnt-plan"></span></button>
+          <button class="wb-tabbtn" id="wt-review" onclick="wbSwitch('review')">🗂 하루 리뷰</button>
           <button class="wb-tabbtn" id="wt-attend" onclick="wbSwitch('attend')">🕘 출퇴근기록</button>
           <button class="wb-tabbtn" id="wt-comments" onclick="wbSwitch('comments')">💬 커멘트 이력</button>
         </div>
@@ -411,7 +413,7 @@
       <div id="wb-panel" class="tab-panel"></div>`;
   }
   function wbMount(uid, profile){
-    wbUid=uid; wbProfile=profile||userProfile||{}; wbTab='cal'; wbWeekStart=weekStart(); _rtDone.clear();   // 계정 전환 시 자동생성 가드 초기화(새 계정 루틴 반영)
+    wbUid=uid; wbProfile=profile||userProfile||{}; wbTab='cal'; wbWeekStart=weekStart(); wbReviewDate=today(); _rtDone.clear();   // 계정 전환 시 자동생성 가드 초기화(새 계정 루틴 반영)
     loadBusinesses().then(renderBizBar).catch(e=>console.error('[WB] businesses',e));
     // 오늘 첫 접속 시 자동 이월 → 그 뒤 실시간 리스너 시작
     runCarryover(uid, today()).catch(e=>console.error('[WB] carryover',e)).finally(()=>wbStartRealtime(uid));
@@ -428,7 +430,7 @@
     wbMount(uid, userProfile);
   }
   window.wbSwitch = (tab) => { if(window.flushDailySave) flushDailySave(); wbTab=tab;
-    ['cal','fixed','today','plan','attend','comments'].forEach(t=>{ const b=$('wt-'+t); if(b)b.classList.toggle('active',t===tab); });
+    ['cal','fixed','today','plan','review','attend','comments'].forEach(t=>{ const b=$('wt-'+t); if(b)b.classList.toggle('active',t===tab); });
     wbRenderActive();
   };
   function wbRenderActive(){
@@ -439,6 +441,7 @@
     else if(wbTab==='plan') renderPlanTab(uid);
     else if(wbTab==='attend') renderAttendTab(uid);
     else if(wbTab==='comments') renderCommentsTab(uid);
+    else if(wbTab==='review') renderReviewTab(uid);
   }
   // ── 전체 실시간 리스너(이번 주 slots · 오늘 daily · routines) ──
   function wbStartRealtime(uid){
@@ -1076,6 +1079,69 @@
         <button class="btn btn-ghost" style="width:100%;margin-top:8px" onclick="addTomorrowTask()">＋ 내일 할 일 추가</button>
       </div>`;
     try { await loadDailyReport(uid, today()); } catch(e){ console.error('[WB] loadDailyReport', e); }
+  }
+
+  // ══════════════════════════════════════
+  //  탭: 하루 리뷰 (읽기 전용 — 기존 데이터를 모아서 보여줌, 아무것도 쓰지 않음)
+  // ══════════════════════════════════════
+  window.wbReviewNav = (delta)=>{ const d=new Date((wbReviewDate||today())+'T00:00:00'); d.setDate(d.getDate()+delta); wbReviewDate=ymd(d); renderReviewTab(wbUid||currentUser.uid); };
+  window.wbReviewGo = (ds)=>{ wbReviewDate=ds; renderReviewTab(wbUid||currentUser.uid); };
+  async function renderReviewTab(uid){
+    const p=$('wb-panel'); if(!p) return;
+    const ds=wbReviewDate||today(); const isToday=(ds===today());
+    const isBoss=(userRole==='boss' && wbUid && wbUid!==currentUser.uid);
+    const who=(wbProfile&&wbProfile.displayName)|| (isBoss?'직원':'나');
+    p.innerHTML=`
+      <div class="rv-head">
+        <div class="rv-title">🗂 ${esc(who)}${isBoss?' 님':''}의 하루 리뷰 <span class="muted" style="font-weight:400;font-size:12px">· 흩어진 완료·이월·회고를 한눈에</span></div>
+        <div class="rv-datenav">
+          <button onclick="wbReviewNav(-1)">‹ 어제</button>
+          <span class="rv-cur" id="rv-cur">${dateLabel(ds)}</span>
+          <button onclick="wbReviewNav(1)" ${isToday?'disabled style="opacity:.4;cursor:default"':''}>내일 ›</button>
+          ${isToday?'':'<button class="rv-todaybtn" onclick="wbReviewGo(today())">오늘로</button>'}
+        </div>
+      </div>
+      <div id="rv-body"><div class="empty">불러오는 중…</div></div>`;
+    try{ await loadReview(uid, ds); }catch(e){ console.error('[WB] review',e); const b=$('rv-body'); if(b) b.innerHTML='<div class="empty">불러오지 못했어요. 잠시 후 다시 시도해 주세요.</div>'; }
+  }
+  async function loadReview(uid, ds){
+    const [sSnap,dSnap]=await Promise.all([
+      getDocs(query(collection(db,"slots"),where("uid","==",uid),where("date","==",ds))),
+      getDoc(doc(db,"daily",`${uid}_${ds}`))
+    ]);
+    const slots=[]; sSnap.forEach(x=>slots.push({id:x.id,...x.data()}));
+    const d=dSnap.exists()?dSnap.data():{};
+    const done=slots.filter(s=>s.status==='done'&&s.title);
+    const undone=slots.filter(s=>s.status!=='done'&&s.title);
+    const carried=undone.filter(s=>s.carriedFrom);
+    const fresh=undone.filter(s=>!s.carriedFrom);
+    const total=done.length+undone.length; const pct=total?Math.round(done.length/total*100):0;
+    const pc=pct>=80?'var(--success)':pct>=50?'var(--warn)':'var(--danger)';
+    const sortT=(a,b)=>((a.plannedTime||a.startTime||'99:99')+'' ).localeCompare((b.plannedTime||b.startTime||'99:99')+'');
+    done.sort(sortT); carried.sort(sortT); fresh.sort(sortT);
+    const tm=s=>esc(s.plannedTime||s.startTime||'');
+    const doneRow=s=>`<div class="rv-item"><span class="rv-ico done">✓</span><div class="rv-b"><div class="rv-t is-done">${esc(s.title)}</div><div class="rv-m">${tm(s)}${(s.doneNote||'').trim()?` · 성과: ${esc(s.doneNote)}`:''}</div></div></div>`;
+    const carryRow=s=>`<div class="rv-item"><span class="rv-ico carry">⏭</span><div class="rv-b"><div class="rv-t">${esc(s.title)} <span class="pill pill-carry">이월</span>${s.disposition==='blocked'?' <span class="pill pill-block">진행불가</span>':''}</div><div class="rv-m">${tm(s)}${(s.incompleteReason||'').trim()?` · 사유: ${esc(s.incompleteReason)}`:''}</div></div></div>`;
+    const freshRow=s=>`<div class="rv-item"><span class="rv-ico new">${s.fromRoutine?'📌':'＋'}</span><div class="rv-b"><div class="rv-t">${esc(s.title)}${s.fromRoutine?' <span class="pill pill-rt">필수</span>':''}${s.disposition==='blocked'?' <span class="pill pill-block">진행불가</span>':''}</div><div class="rv-m">${tm(s)}${(s.incompleteReason||'').trim()?` · 사유: ${esc(s.incompleteReason)}`:''}</div></div></div>`;
+    const fb=(d.selfFeedback||'').trim(), im=(d.improve||'').trim(), bl=(d.blocker||'').trim();
+    const att=d.clockIn?`출근 ${esc(d.clockIn)}${d.clockOut?` · 퇴근 ${esc(d.clockOut)}`:''}`:'미출근';
+    const box=$('rv-body'); if(!box) return;
+    box.innerHTML=`
+      <div class="rv-kpis">
+        <div class="rv-kpi"><div class="rv-lab">완료율</div><div class="rv-num tnum" style="color:${pc}">${pct}%</div><div class="rv-desc">${total}건 중 ${done.length}건 완료 · ${esc(att)}</div><div class="rv-bar"><i style="width:${pct}%;background:${pc}"></i></div></div>
+        <div class="rv-kpi"><div class="rv-lab">이어갈 일 (이월)</div><div class="rv-num tnum" style="color:var(--warn)">${carried.length}</div><div class="rv-desc">아직 안 끝나 넘어온 업무</div></div>
+        <div class="rv-kpi"><div class="rv-lab">그 밖의 남은 일</div><div class="rv-num tnum" style="color:var(--accent-text)">${fresh.length}</div><div class="rv-desc">이 날 새로 잡은/필수 업무</div></div>
+      </div>
+      <div class="rv-sec">✓ 완료한 업무 · ${done.length}건</div>
+      <div class="soft-card rv-card">${done.length?done.map(doneRow).join(''):'<div class="empty">이 날 완료 처리된 업무가 없어요.</div>'}</div>
+      <div class="rv-sec">남은 업무 · ${undone.length}건</div>
+      <div class="soft-card rv-card">${undone.length?(carried.map(carryRow).join('')+fresh.map(freshRow).join('')):'<div class="empty">남은 업무가 없어요 👍</div>'}</div>
+      <div class="rv-sec">회고 — 자체 피드백 · 배운 점 · 막힌 것</div>
+      <div class="rv-grid3">
+        <div class="soft-card"><div class="rv-flabel">📝 자체 피드백</div><div class="fbox">${fb?esc(fb):'<span class="muted">(입력 없음)</span>'}</div></div>
+        <div class="soft-card"><div class="rv-flabel">💡 배운 점 / 개선점</div><div class="fbox">${im?esc(im):'<span class="muted">(입력 없음)</span>'}</div></div>
+        <div class="soft-card"><div class="rv-flabel" style="color:var(--danger)">🆘 막힌 것</div><div class="fbox${bl?' danger':''}">${bl?esc(bl):'<span class="muted">(없음)</span>'}</div></div>
+      </div>`;
   }
 
   // ══════════════════════════════════════
@@ -2232,6 +2298,38 @@ body{font-family:-apple-system,'Malgun Gothic','맑은 고딕',sans-serif;backgr
 .pill{font-size:10px;font-weight:600;padding:2px 7px;border-radius:20px;vertical-align:1px;}
 .pill-carry{background:#f59e0b;color:#fff;font-weight:700;}
 .pill-help{background:var(--danger);color:#fff;font-weight:700;}
+.pill-rt{background:var(--accent-bg);color:var(--accent-text);font-weight:800;}
+.pill-block{background:var(--danger-bg);color:var(--danger);font-weight:800;}
+/* 하루 리뷰 탭 */
+.rv-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:space-between;margin:2px 0 4px;}
+.rv-title{font-weight:800;font-size:16px;}
+.rv-datenav{display:inline-flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:4px 6px;box-shadow:0 1px 2px rgba(30,40,80,.04);}
+.rv-datenav button{border:0;background:transparent;color:var(--text-3);font-size:13px;font-weight:700;cursor:pointer;padding:5px 9px;border-radius:6px;}
+.rv-datenav button:hover{background:var(--surface-2);color:var(--text);}
+.rv-datenav .rv-cur{font-weight:800;color:var(--text);padding:0 4px;font-variant-numeric:tabular-nums;}
+.rv-datenav .rv-todaybtn{background:var(--accent-bg);color:var(--accent-text);}
+.rv-kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:14px 0 4px;}
+.rv-kpi{background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:0 1px 2px rgba(30,40,80,.03);padding:14px 16px;}
+.rv-lab{color:var(--text-3);font-size:12px;font-weight:700;}
+.rv-num{font-size:28px;font-weight:800;letter-spacing:-1px;margin:1px 0;}
+.rv-desc{color:var(--text-3);font-size:11.5px;}
+.rv-bar{height:7px;border-radius:6px;background:var(--surface-2);overflow:hidden;margin-top:7px;}
+.rv-bar > i{display:block;height:100%;border-radius:6px;}
+.rv-sec{font-weight:800;font-size:13px;color:var(--text-2);margin:20px 2px 8px;}
+.rv-card{padding:6px 14px;}
+.rv-item{display:flex;align-items:flex-start;gap:10px;padding:9px 2px;border-bottom:1px solid var(--border);}
+.rv-item:last-child{border-bottom:0;}
+.rv-ico{width:20px;height:20px;border-radius:6px;flex:none;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;margin-top:1px;}
+.rv-ico.done{background:var(--success-bg);color:var(--success);}
+.rv-ico.carry{background:var(--warn-bg);color:var(--warn);}
+.rv-ico.new{background:var(--accent-bg);color:var(--accent-text);}
+.rv-b{flex:1;min-width:0;}
+.rv-t{font-weight:600;}
+.rv-t.is-done{color:var(--text-3);}
+.rv-m{color:var(--text-3);font-size:11.5px;margin-top:1px;}
+.rv-flabel{font-weight:800;font-size:12.5px;margin-bottom:6px;}
+.rv-grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;}
+@media(max-width:900px){ .rv-kpis,.rv-grid3{grid-template-columns:1fr;} }
 .seg-group{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;flex-shrink:0;}
 .seg{border:none;background:var(--surface);color:var(--text-3);font-size:11.5px;font-weight:600;padding:5px 9px;cursor:pointer;border-left:1px solid var(--border);}
 .seg:first-child{border-left:none;}
