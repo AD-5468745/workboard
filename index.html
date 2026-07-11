@@ -427,7 +427,7 @@
     main.appendChild(wrap);
     wbMount(uid, userProfile);
   }
-  window.wbSwitch = (tab) => { wbTab=tab;
+  window.wbSwitch = (tab) => { if(window.flushDailySave) flushDailySave(); wbTab=tab;
     ['cal','fixed','today','plan','attend','comments'].forEach(t=>{ const b=$('wt-'+t); if(b)b.classList.toggle('active',t===tab); });
     wbRenderActive();
   };
@@ -1025,6 +1025,7 @@
   //  탭3: 오늘 진행중
   // ══════════════════════════════════════
   async function renderTodayTab(uid){
+    if(window.flushDailySave) flushDailySave();   // 화면 새로 그리기 전, 적어둔 것 먼저 저장(유실 방지)
     const p=$('wb-panel'); const ws=(wbProfile&&wbProfile.workStart)||DEFAULT_START, we=(wbProfile&&wbProfile.workEnd)||DEFAULT_END;
     p.innerHTML=`
       <div class="link-conn">🔗 캘린더의 오늘 업무가 여기 <b>주제별</b>로 모입니다. 상태를 바꾸면 캘린더 음영도 같이 바뀝니다. (출퇴근은 <b>🕘 출퇴근기록</b> 탭)</div>
@@ -1042,9 +1043,9 @@
         <div id="organize-preview"></div>
       </div>
       <div class="soft-card" style="margin-top:16px">
-        <label class="fld">자체 피드백</label><textarea id="self-feedback" class="ta" placeholder="오늘 이슈·반성·특이사항" oninput="scheduleDailySave()"></textarea>
-        <label class="fld" style="margin-top:12px">배운 점 / 개선점 (회고)</label><textarea id="improve-input" class="ta" placeholder="오늘 배운 점, 다음에 개선할 점" oninput="scheduleDailySave()"></textarea>
-        <label class="fld danger" style="margin-top:12px">막힌 것 · 도움이 필요한 것</label><textarea id="blocker-input" class="ta" placeholder="지금 막힌 것 (없으면 비워두기)" oninput="scheduleDailySave()"></textarea>
+        <label class="fld">자체 피드백</label><textarea id="self-feedback" class="ta" placeholder="오늘 이슈·반성·특이사항" oninput="scheduleDailySave('selfFeedback')" onblur="flushDailySave()"></textarea>
+        <label class="fld" style="margin-top:12px">배운 점 / 개선점 (회고)</label><textarea id="improve-input" class="ta" placeholder="오늘 배운 점, 다음에 개선할 점" oninput="scheduleDailySave('improve')" onblur="flushDailySave()"></textarea>
+        <label class="fld danger" style="margin-top:12px">막힌 것 · 도움이 필요한 것</label><textarea id="blocker-input" class="ta" placeholder="지금 막힌 것 (없으면 비워두기)" oninput="scheduleDailySave('blocker')" onblur="flushDailySave()"></textarea>
       </div>
       <div id="miss-check" style="margin-top:14px"></div>`;
     try { await loadDailyReport(uid, today()); } catch(e){ console.error('[WB] loadDailyReport', e); }
@@ -1056,6 +1057,7 @@
   //  탭4: 내일 계획 (오늘 미완 자동 이월 예정 + 직접 추가)
   // ══════════════════════════════════════
   async function renderPlanTab(uid){
+    if(window.flushDailySave) flushDailySave();   // 화면 새로 그리기 전, 적어둔 것 먼저 저장(유실 방지)
     const p=$('wb-panel'); const t=new Date(); t.setDate(t.getDate()+1); const tmr=dateLabel(ymd(t));
     const _rtTitles=new Set((wbCache.routines||[]).filter(r=>r.active!==false&&(r.targetUid==='all'||r.targetUid===uid)&&r.title).map(r=>r.title.trim()));
     const inc=(wbCache.slots||[]).filter(s=>s.date===today() && (s.status||'todo')!=='done' && s.title && bizMatch(s) && !carryExcluded(s,_rtTitles));
@@ -1068,7 +1070,7 @@
       <div class="soft-card" style="margin-top:14px">
         <div class="sec-title" style="margin-bottom:6px">내일 계획 직접 추가 <span class="muted">· ${tmr}</span></div>
         <label class="fld" style="margin-top:4px">내일 계획 — 자세히</label>
-        <textarea id="tomorrow-detail" class="ta" placeholder="내일 무엇을·언제·왜 (적어두면 내일 아침 그대로 이어져요)" style="height:70px" oninput="scheduleDailySave()"></textarea>
+        <textarea id="tomorrow-detail" class="ta" placeholder="내일 무엇을·언제·왜 (적어두면 내일 아침 그대로 이어져요)" style="height:70px" oninput="scheduleDailySave('tomorrowDetail')" onblur="flushDailySave()"></textarea>
         <label class="fld" style="margin-top:12px">내일 할 일 목록</label>
         <div id="tomorrow-slots"></div>
         <button class="btn btn-ghost" style="width:100%;margin-top:8px" onclick="addTomorrowTask()">＋ 내일 할 일 추가</button>
@@ -1503,31 +1505,40 @@
     renderTaskList(uid); closeSide();
   };
 
-  // ── 자동저장(회고/막힌것/내일계획/내일목록) ──
-  let _saveTimer=null;
+  // ── 자동저장(회고/막힌것/내일계획/내일목록) — 데이터 무손실 원칙 ──
+  // 규칙: '사용자가 실제로 고친 칸(_dailyDirty)'만 저장한다. 화면이 새로 그려져 잠깐 빈 칸이 돼도
+  // 그 칸은 dirty가 아니므로 절대 빈 값으로 덮어쓰지 않는다. 저장 성공한 칸만 dirty 해제(실패 시 유지=재시도).
+  // 꼬리 유실 방지: 탭 이동/포커스 아웃/화면 숨김 시 즉시 저장(flushDailySave, 값은 화면이 바뀌기 전 동기적으로 캡처됨).
+  let _saveTimer=null; const _dailyDirty=new Set();
   function showSaveStatus(txt,color){ const e=$('save-status'); if(e){ e.textContent=txt; e.style.color=color||'var(--text-3)'; } }
-  window.scheduleDailySave = () => { if(!currentUser) return; showSaveStatus('저장 중…','var(--warn)'); clearTimeout(_saveTimer); _saveTimer=setTimeout(doDailySave,1000); };
+  window.scheduleDailySave = (field) => { if(!currentUser) return; if(field) _dailyDirty.add(field); showSaveStatus('저장 중…','var(--warn)'); clearTimeout(_saveTimer); _saveTimer=setTimeout(doDailySave,1000); };
+  window.flushDailySave = () => { if(_saveTimer){ clearTimeout(_saveTimer); _saveTimer=null; } if(_dailyDirty.size && currentUser) doDailySave(); };
   async function doDailySave(){
-    if(!currentUser) return; const uid=currentUser.uid, dateStr=today();
-    // 탭별로 존재하는 입력만 저장(다른 탭 값 덮어쓰기 방지)
-    const payload={ uid, date:dateStr, updatedAt:Timestamp.now() };
-    if($('self-feedback')) payload.selfFeedback=$('self-feedback').value.trim();
-    if($('improve-input')) payload.improve=$('improve-input').value.trim();
-    if($('blocker-input')) payload.blocker=$('blocker-input').value.trim();
-    if($('tomorrow-detail')) payload.tomorrowDetail=$('tomorrow-detail').value.trim();
-    if($('tomorrow-slots')) payload.tomorrowTasks=[...document.querySelectorAll('.tomorrow-task')].map(i=>i.value.trim()).filter(Boolean);
+    if(!currentUser || !_dailyDirty.size) return;   // 사용자가 고친 게 없으면 아무것도 쓰지 않음(빈 값 덮어쓰기 원천 차단)
+    const uid=currentUser.uid, dateStr=today();
+    const payload={ uid, date:dateStr, updatedAt:Timestamp.now() }; const wrote=[];
+    // 고쳐진(dirty) 칸만, 그 칸이 지금 화면에 있을 때만 저장(값은 여기서 동기적으로 캡처)
+    if(_dailyDirty.has('selfFeedback') && $('self-feedback')){ payload.selfFeedback=$('self-feedback').value.trim(); wrote.push('selfFeedback'); }
+    if(_dailyDirty.has('improve') && $('improve-input')){ payload.improve=$('improve-input').value.trim(); wrote.push('improve'); }
+    if(_dailyDirty.has('blocker') && $('blocker-input')){ payload.blocker=$('blocker-input').value.trim(); wrote.push('blocker'); }
+    if(_dailyDirty.has('tomorrowDetail') && $('tomorrow-detail')){ payload.tomorrowDetail=$('tomorrow-detail').value.trim(); wrote.push('tomorrowDetail'); }
+    if(_dailyDirty.has('tomorrowTasks') && $('tomorrow-slots')){ payload.tomorrowTasks=[...document.querySelectorAll('.tomorrow-task')].map(i=>i.value.trim()).filter(Boolean); wrote.push('tomorrowTasks'); }
+    if(!wrote.length) return;   // dirty 칸이 지금 화면에 없으면(다른 탭) 이번엔 안 씀 — dirty 유지해 나중에 저장
     try{
       await setDoc(doc(db,"daily",`${uid}_${dateStr}`),payload,{merge:true});
-      showSaveStatus('저장됨 ✓','var(--success)'); updateMissCheck();
+      wrote.forEach(f=>_dailyDirty.delete(f)); showSaveStatus('저장됨 ✓','var(--success)'); updateMissCheck();
     }catch(e){ showSaveStatus('저장 실패 — 잠시 후 다시','var(--danger)'); }
   }
+  // 탭을 숨기거나(다른 창/앱 전환) 닫기 직전에도 적어둔 것 즉시 저장
+  document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='hidden' && window.flushDailySave) flushDailySave(); });
   async function loadDailyReport(uid, dateStr){
     const snap=await getDoc(doc(db,"daily",`${uid}_${dateStr}`)); const d=snap.exists()?snap.data():{};
-    if($('self-feedback')) $('self-feedback').value=d.selfFeedback||'';
-    if($('improve-input')) $('improve-input').value=d.improve||'';
-    if($('blocker-input')) $('blocker-input').value=d.blocker||'';
-    if($('tomorrow-detail')) $('tomorrow-detail').value=d.tomorrowDetail||'';
-    if($('tomorrow-slots')){ $('tomorrow-slots').innerHTML=''; (d.tomorrowTasks||[]).forEach(t=>addTomorrowTask(t)); }
+    // 사용자가 지금 고치는 중(dirty)인 칸은 덮어쓰지 않는다(불러오는 사이 입력한 것 보존)
+    if($('self-feedback') && !_dailyDirty.has('selfFeedback')) $('self-feedback').value=d.selfFeedback||'';
+    if($('improve-input') && !_dailyDirty.has('improve')) $('improve-input').value=d.improve||'';
+    if($('blocker-input') && !_dailyDirty.has('blocker')) $('blocker-input').value=d.blocker||'';
+    if($('tomorrow-detail') && !_dailyDirty.has('tomorrowDetail')) $('tomorrow-detail').value=d.tomorrowDetail||'';
+    if($('tomorrow-slots') && !_dailyDirty.has('tomorrowTasks')){ $('tomorrow-slots').innerHTML=''; (d.tomorrowTasks||[]).forEach(t=>addTomorrowTask(t)); }
     renderClockStatus(d);
     if(typeof renderBossMsgBanner==='function') renderBossMsgBanner(d);
     updateMissCheck();
@@ -1535,7 +1546,7 @@
   window.addTomorrowTask = (val='') => {
     const wrap=$('tomorrow-slots'); if(!wrap) return;
     const row=el('div','tmr-row');
-    row.innerHTML=`<input class="mini-input tomorrow-task" style="flex:1" placeholder="내일 할 일" value="${(val||'').replace(/"/g,'&quot;')}" oninput="scheduleDailySave()"><button class="xbtn" onclick="this.parentElement.remove();scheduleDailySave()">✕</button>`;
+    row.innerHTML=`<input class="mini-input tomorrow-task" style="flex:1" placeholder="내일 할 일" value="${(val||'').replace(/"/g,'&quot;')}" oninput="scheduleDailySave('tomorrowTasks')" onblur="flushDailySave()"><button class="xbtn" onclick="this.parentElement.remove();scheduleDailySave('tomorrowTasks')">✕</button>`;
     wrap.appendChild(row);
   };
   window.toggleBulk = () => { const b=$('bulk-box'); if(b) b.style.display=b.style.display==='none'?'block':'none'; };
