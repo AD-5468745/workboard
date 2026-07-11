@@ -347,6 +347,15 @@
   let wbUid=null;                  // 보고 있는 직원 uid(직원=본인, 관리자=선택 직원)
   let wbProfile=null;              // 보고 있는 직원의 프로필(근무시간 등)
   let wbCache={slots:[], daily:{}, routines:[]};
+  const _carryClean=new Set();     // 세션당 (uid_date) 유령 중복 정리 완료 표시 — 반복 접속 시 재읽기 방지
+  // 필수업무(일일 고정업무)는 매일 새로 자동생성되므로 '이월' 대상에서 제외한다.
+  // fromRoutine이거나, 제목이 활성 필수업무 제목과 같으면 제외(연결이 끊긴 옛 이월 복제본도 함께 차단).
+  function carryExcluded(s, routineTitles){
+    if(!s) return false;
+    if(s.fromRoutine) return true;
+    const t=(s.title||'').trim();
+    return !!(t && routineTitles && routineTitles.has(t));
+  }
   let _wbPaint=null;
   // ── 사업(누드/베품 등) 상위 구분 ──
   let businesses=[];
@@ -470,6 +479,7 @@
   }
   function updateTabCounts(){
     const uid=wbUid||currentUser.uid;
+    const rtTitles=new Set((wbCache.routines||[]).filter(r=>r.active!==false&&(r.targetUid==='all'||r.targetUid===uid)&&r.title).map(r=>r.title.trim()));
     const slots=(wbCache.slots||[]).filter(s=>s.date===today()&&bizMatch(s));
     const open=slots.filter(s=>(s.status||'todo')!=='done'&&s.title).length;
     const set=(id,v)=>{ const e=$(id); if(e) e.textContent=v||''; };
@@ -477,7 +487,8 @@
     const routines=(wbCache.routines||[]).filter(r=>r.active!==false&&(r.targetUid==='all'||r.targetUid===uid)&&bizMatch(r)&&dayMatch(r,today()));
     const rdone=new Set(((wbCache.daily&&wbCache.daily.routinesDone))||[]);
     set('cnt-fixed',routines.length?`${routines.filter(r=>rdone.has(r.id)).length}/${routines.length}`:'');
-    const plan=(((wbCache.daily&&wbCache.daily.tomorrowTasks))||[]).filter(Boolean).length+open;
+    const carryOpen=slots.filter(s=>(s.status||'todo')!=='done'&&s.title&&!carryExcluded(s,rtTitles)).length;   // 필수업무는 이월 안 되므로 '내일 계획' 수에서 제외
+    const plan=(((wbCache.daily&&wbCache.daily.tomorrowTasks))||[]).filter(Boolean).length+carryOpen;
     set('cnt-plan',plan);
   }
 
@@ -1046,7 +1057,8 @@
   // ══════════════════════════════════════
   async function renderPlanTab(uid){
     const p=$('wb-panel'); const t=new Date(); t.setDate(t.getDate()+1); const tmr=dateLabel(ymd(t));
-    const inc=(wbCache.slots||[]).filter(s=>s.date===today() && (s.status||'todo')!=='done' && s.title && bizMatch(s));
+    const _rtTitles=new Set((wbCache.routines||[]).filter(r=>r.active!==false&&(r.targetUid==='all'||r.targetUid===uid)&&r.title).map(r=>r.title.trim()));
+    const inc=(wbCache.slots||[]).filter(s=>s.date===today() && (s.status||'todo')!=='done' && s.title && bizMatch(s) && !carryExcluded(s,_rtTitles));
     p.innerHTML=`
       <div class="link-conn">🔗 오늘 <b>못 끝낸 업무</b>는 내일이 되면 자동으로 <b>'오늘 진행중'</b>으로 넘어갑니다.</div>
       <div class="soft-card">
@@ -1164,29 +1176,53 @@
   // ── 자동 이월: 이전 마지막 근무일의 미완 → 오늘(원본 보존, 중복 방지) ──
   async function runCarryover(uid, dateStr){
     if(!currentUser || uid!==currentUser.uid) return;   // 본인 접속 때만 이월(관리자가 직원 화면 열 땐 읽기만)
+    const sessKey=uid+'_'+dateStr;
     const dref=doc(db,"daily",`${uid}_${dateStr}`);
     const dsnap=await getDoc(dref);
-    if(dsnap.exists() && dsnap.data().carryDone) return;
+    const alreadyCarried = dsnap.exists() && !!dsnap.data().carryDone;
+    if(alreadyCarried && _carryClean.has(sessKey)) return;   // 이월도 끝났고 이번 세션서 중복정리도 완료 → 재읽기 없음
+    // 필수업무 제목 목록(이월 제외 + 유령 복제본 정리 판정용).
+    // 이 시점엔 실시간 리스너 시작 전이라 wbCache.routines가 비어 있어 직접 한 번 읽어온다.
+    const routineTitles=new Set();
+    try{ const rs=await getDocs(collection(db,"routines"));
+      rs.forEach(d=>{ const r=d.data(); if(r.active!==false && (r.targetUid==='all'||r.targetUid===uid) && r.title) routineTitles.add(r.title.trim()); });
+    }catch(e){ console.error('[WB] carryover routines',e); }
     const all=await getDocs(query(collection(db,"slots"),where("uid","==",uid)));
-    const byDate={}; const todayTitles=new Set(); const carriedIds=new Set();
+    const byDate={}; const todayList=[]; const todayTitles=new Set(); const carriedIds=new Set();
     all.forEach(d=>{ const s=d.data(); if(!s.date) return;
-      if(s.date===dateStr){ if(s.title) todayTitles.add(s.title.trim()); if(s.carriedFromId) carriedIds.add(s.carriedFromId); }
+      if(s.date===dateStr){ todayList.push({id:d.id,...s}); if(s.title) todayTitles.add(s.title.trim()); if(s.carriedFromId) carriedIds.add(s.carriedFromId); }
       else if(s.date<dateStr){ (byDate[s.date]=byDate[s.date]||[]).push({id:d.id,...s}); } });
+    // ── (A) 이미 쌓인 '필수업무 유령 이월 복제본' 정리 ── carryDone 여부와 무관하게 세션당 1회.
+    //   안전: 오늘 같은 제목의 진짜 필수업무(fromRoutine=_rt_) 쌍둥이가 있을 때만 이월 복제본을 지운다(원본은 남으므로 데이터 손실 0).
+    try{
+      const rtTwin=new Set(todayList.filter(s=>s.fromRoutine && s.title).map(s=>s.title.trim()));
+      const dels=[];
+      for(const s of todayList){
+        const t=(s.title||'').trim();
+        if(!s.fromRoutine && (s.carriedFrom||s.carriedFromId) && t && routineTitles.has(t) && rtTwin.has(t)){
+          dels.push(deleteDoc(doc(db,"slots",s.id)));
+        }
+      }
+      if(dels.length) await Promise.all(dels);
+    }catch(e){ console.error('[WB] dupe cleanup',e); }
+    _carryClean.add(sessKey);
+    if(alreadyCarried) return;   // 이월은 하루 1번만(정리는 위에서 이미 끝냄)
     const prev=Object.keys(byDate).sort().reverse();
     if(!prev.length){ await setDoc(dref,{uid,date:dateStr,carryDone:'none',updatedAt:Timestamp.now()},{merge:true}); return; }
     const src=prev[0];
-    const undone=byDate[src].filter(s=>s.title && s.status!=='done' && s.disposition!=='blocked');   // 진행불가는 이월 제외
+    // 진행불가·필수업무는 이월 제외(필수업무는 매일 새로 자동생성되므로 이월하면 복제본이 됨)
+    const undone=byDate[src].filter(s=>s.title && s.status!=='done' && s.disposition!=='blocked' && !carryExcluded(s, routineTitles));
     const writes=[];
     for(const s of undone){
       if(carriedIds.has(s.id)) continue; carriedIds.add(s.id);   // 원본 업무 id로 중복 방지(제목 아님 → 같은 제목 2건도 각각 이월)
       const id=`${uid}_${dateStr}_${newKey()}`;
       writes.push(setDoc(doc(db,"slots",id),{ uid, date:dateStr, title:s.title, biz:s.biz||'', status:'todo', important:!!s.important, category:s.category||'', subtasks:(s.subtasks||[]).map(x=>({text:x.text,done:!!x.done})), startTime:s.startTime||s.plannedTime||'', endTime:s.endTime||'', plannedTime:s.plannedTime||s.startTime||s.hour||'', links:s.links||[], carriedFrom:src, carriedFromId:s.id, weekStart:weekStart(new Date(dateStr)), updatedAt:Timestamp.now() }));
     }
-    // 전날 '내일 할 일 목록'(daily.tomorrowTasks)도 오늘 할 일로 이월(목록은 id가 없어 제목으로 중복 방지)
+    // 전날 '내일 할 일 목록'(daily.tomorrowTasks)도 오늘 할 일로 이월(목록은 id가 없어 제목으로 중복 방지 + 필수업무 제목 제외)
     try{ const pd=await getDoc(doc(db,"daily",`${uid}_${src}`));
       const plan=pd.exists()?(pd.data().tomorrowTasks||[]):[];
       const seen=new Set([...todayTitles]);
-      for(const raw of plan){ const tt=(raw||'').trim(); if(!tt||seen.has(tt)) continue; seen.add(tt);
+      for(const raw of plan){ const tt=(raw||'').trim(); if(!tt||seen.has(tt)||routineTitles.has(tt)) continue; seen.add(tt);
         const id=`${uid}_${dateStr}_${newKey()}`;
         writes.push(setDoc(doc(db,"slots",id),{ uid, date:dateStr, title:tt, status:'todo', important:false, carriedFrom:src, fromPlan:true, weekStart:weekStart(new Date(dateStr)), updatedAt:Timestamp.now() }));
       }
@@ -1318,9 +1354,11 @@
   };
   window.setTaskStatus = async (uid, id, status) => {
     const t=todayTasks.find(x=>x.id===id); if(!t) return;
+    const prev=t.status;
     t.status=status; if(status==='todo'||status==='done') expandedMiss.add(id); else expandedMiss.delete(id);   // 미완료→처리, 완료→성과 패널 펼침
     renderTaskList(uid);
-    await setDoc(doc(db,"slots",id),{status,updatedAt:Timestamp.now()},{merge:true});
+    try{ await setDoc(doc(db,"slots",id),{status,updatedAt:Timestamp.now()},{merge:true}); }
+    catch(e){ t.status=prev; renderTaskList(uid); alert('상태 저장에 실패했어요(권한·네트워크). 화면엔 완료로 보여도 실제 저장이 안 된 것이니 다시 눌러 주세요.\n'+fbErr(e)); return; }   // 저장 실패 시 조용히 넘기지 않고 되돌림+알림
     if(t.fromRoutine) mirrorRoutineDone(t.fromRoutine, t.uid||uid, status==='done');
     syncGoals(uid);
   };
@@ -1619,11 +1657,22 @@
   window.toggleRoutineDone = async (uid, rid) => {
     const dateStr=today(); const ref=doc(db,"daily",`${uid}_${dateStr}`); const snap=await getDoc(ref);
     const cur=new Set(((snap.exists()?snap.data().routinesDone:[])||[])); cur.has(rid)?cur.delete(rid):cur.add(rid);
-    await setDoc(ref,{uid,date:dateStr,routinesDone:[...cur],updatedAt:Timestamp.now()},{merge:true});
-    // 자동 생성된 오늘 업무가 있으면 상태를 같이 맞춘다(양방향 동기화)
-    try{ const slotId=`${uid}_${dateStr}_rt_${rid}`; const sSnap=await getDoc(doc(db,"slots",slotId));
-      if(sSnap.exists()){ const want=cur.has(rid)?'done':'todo'; if((sSnap.data().status||'todo')!==want) await setDoc(doc(db,"slots",slotId),{status:want,updatedAt:Timestamp.now()},{merge:true}); }
-    }catch(e){}
+    try{ await setDoc(ref,{uid,date:dateStr,routinesDone:[...cur],updatedAt:Timestamp.now()},{merge:true}); }
+    catch(e){ alert('필수업무 완료 저장에 실패했어요(권한·네트워크). 다시 시도해 주세요.\n'+fbErr(e)); loadRoutinesChecklist(uid,'routines-box',dateStr); return; }   // 저장 실패 시 조용히 넘기지 않음
+    // 자동 생성된 오늘 업무 슬롯도 같은 상태로 맞춘다 — 없으면 만들어서라도 완료를 남긴다(체크가 슬롯에 유실되지 않게)
+    try{
+      const want=cur.has(rid)?'done':'todo';
+      const slotId=`${uid}_${dateStr}_rt_${rid}`;
+      const sSnap=await getDoc(doc(db,"slots",slotId));
+      if(sSnap.exists()){
+        if((sSnap.data().status||'todo')!==want) await setDoc(doc(db,"slots",slotId),{status:want,updatedAt:Timestamp.now()},{merge:true});
+      } else if(want==='done'){
+        const r=(wbCache.routines||[]).find(x=>x.id===rid);   // 슬롯이 아직 자동생성 전 → 완료 표시 유실 방지 위해 생성(시간 있는 필수업무만)
+        if(r && r.time){ let en=r.endTime||''; if(!en){ const m=toMin(r.time); if(m!=null) en=minHM(Math.min(m+30,23*60+59)); }
+          await setDoc(doc(db,"slots",slotId),{ uid, date:dateStr, title:r.title||'필수 업무', guide:r.guide||'', biz:r.biz||'', category:r.category||'', status:'done', important:false, startTime:r.time||'', endTime:en, plannedTime:r.time||'', weekStart:weekStart(new Date(dateStr+'T00:00:00')), fromRoutine:rid, updatedAt:Timestamp.now() },{merge:true});
+        }
+      }
+    }catch(e){ console.error('[WB] routine slot sync',e); }
     loadRoutinesChecklist(uid,'routines-box',dateStr);
   };
   window.openRoutineManager = async (uid, editRid) => {
@@ -1706,6 +1755,7 @@
     const routines=(wbCache.routines||[]).filter(r=>r.active!==false && r.time && (r.targetUid==='all'||r.targetUid===uid));
     if(!routines.length) return false;
     const skipped=new Set(((wbCache.daily&&wbCache.daily.routineSlotsSkipped)||[]));   // '다시 안 뜨게'는 오늘 daily 기준
+    const rdone=new Set(((wbCache.daily&&wbCache.daily.routinesDone)||[]));   // 오늘 체크리스트에서 완료 찍힌 필수업무 = 슬롯 완료상태의 진실원천(오늘만)
     const src=(existing&&existing.length!=null)?existing:(wbCache.slots||[]);           // 완료상태 보존: 기존 slot 참조
     const tds=today();
     const ops=[];   // [key, id, data]
@@ -1719,13 +1769,16 @@
         if(dateStr===tds && skipped.has(r.id)){ _rtDone.add(key); return; }   // 오늘만 '다시 안 뜨게' 적용
         const id=`${uid}_${dateStr}_rt_${r.id}`;
         const cur=byId.get(id);
+        const wantDone = (dateStr===tds && rdone.has(r.id));   // 오늘 체크리스트에서 완료면 슬롯도 완료여야 함
         if(!cur){
           let en=r.endTime||''; if(!en){ const m=toMin(r.time); if(m!=null) en=minHM(Math.min(m+30,23*60+59)); }
-          ops.push([key, id, { uid, date:dateStr, title:r.title||'필수 업무', guide:r.guide||'', biz:r.biz||'', category:r.category||'', status:'todo', important:false, startTime:r.time||'', endTime:en, plannedTime:r.time||'', weekStart:weekStart(new Date(dateStr+'T00:00:00')), fromRoutine:r.id, updatedAt:Timestamp.now() }]);
-        } else if((cur.guide||'')!==(r.guide||'')){
-          ops.push([key, id, { guide:r.guide||'', updatedAt:Timestamp.now() }]);   // 이미 생긴 업무에 작업내용 채워넣기(backfill) — status는 건드리지 않음(완료 보존)
+          ops.push([key, id, { uid, date:dateStr, title:r.title||'필수 업무', guide:r.guide||'', biz:r.biz||'', category:r.category||'', status:(wantDone?'done':'todo'), important:false, startTime:r.time||'', endTime:en, plannedTime:r.time||'', weekStart:weekStart(new Date(dateStr+'T00:00:00')), fromRoutine:r.id, updatedAt:Timestamp.now() }]);
         } else {
-          _rtDone.add(key);   // 이미 맞음 → 쓰기 없이 완료 표시
+          const patch={};
+          if((cur.guide||'')!==(r.guide||'')) patch.guide=r.guide||'';   // 작업내용(SOP) backfill
+          if(wantDone && (cur.status||'todo')!=='done') patch.status='done';   // 체크리스트 완료가 슬롯에 반영 안 됐으면 완료로 맞춤(완료 방향만 — 절대 되돌리지 않음)
+          if(Object.keys(patch).length){ patch.updatedAt=Timestamp.now(); ops.push([key, id, patch]); }
+          else { _rtDone.add(key); }   // 이미 맞음 → 쓰기 없이 완료 표시
         }
       });
     }
