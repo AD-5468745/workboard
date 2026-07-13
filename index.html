@@ -348,7 +348,7 @@
   let wbProfile=null;              // 보고 있는 직원의 프로필(근무시간 등)
   let wbReviewDate=null;           // 하루 리뷰 탭이 보고 있는 날짜(기본 오늘, 어제/오늘 이동)
   let _teamDate=null, _teamStaff=null;   // 관리자 팀 전체 현황이 보는 날짜 + 직원목록(날짜 이동용)
-  let wbCache={slots:[], daily:{}, routines:[]};
+  let wbCache={slots:[], daily:{}, dailyDate:null, routines:[]};
   const _carryClean=new Set();     // 세션당 (uid_date) 유령 중복 정리 완료 표시 — 반복 접속 시 재읽기 방지
   // 필수업무(일일 고정업무)는 매일 새로 자동생성되므로 '이월' 대상에서 제외한다.
   // fromRoutine이거나, 제목이 활성 필수업무 제목과 같으면 제외(연결이 끊긴 옛 이월 복제본도 함께 차단).
@@ -417,7 +417,7 @@
     wbUid=uid; wbProfile=profile||userProfile||{}; wbTab='cal'; wbWeekStart=weekStart(); wbReviewDate=today(); _rtDone.clear();   // 계정 전환 시 자동생성 가드 초기화(새 계정 루틴 반영)
     loadBusinesses().then(renderBizBar).catch(e=>console.error('[WB] businesses',e));
     // 오늘 첫 접속 시 자동 이월 → 그 뒤 실시간 리스너 시작
-    runCarryover(uid, today()).catch(e=>console.error('[WB] carryover',e)).finally(()=>wbStartRealtime(uid));
+    runCarryover(uid, today()).catch(e=>console.error('[WB] carryover',e)).then(()=>reconcileRoutineDone(uid, today()).catch(e=>console.error('[WB] reconcile',e))).finally(()=>wbStartRealtime(uid));
     wbRenderActive();
   }
   function renderStaffView(uid){
@@ -449,12 +449,14 @@
     unsubListeners.forEach(u=>{try{u();}catch(e){}}); unsubListeners=[];
     wbNotifReset(); startScheduleWatch();
     const ws=weekStart();
+    wbCache.daily={}; wbCache.dailyDate=null;   // 자정 넘김·재시작 시 '어제 완료기록'이 남아 오늘로 새는 것 차단(새 리스너가 오늘 것으로 다시 채움)
     try{
       unsubListeners.push(onSnapshot(query(collection(db,"slots"),where("uid","==",uid),where("weekStart","==",ws)),
         s=>{ if(wbWeekStart===ws){ wbCache.slots=[]; s.forEach(d=>wbCache.slots.push({id:d.id,...d.data()})); } wbOnData(); },
         e=>{ console.error('[WB] slots listen',e); setLive(false); }));
-      unsubListeners.push(onSnapshot(doc(db,"daily",`${uid}_${today()}`),
-        s=>{ wbCache.daily=s.exists()?s.data():{}; wbOnData(); },
+      const _dailyDate=today();   // 이 리스너가 보는 daily의 '날짜' 도장 — 완료기록을 그 날짜에만 유효하게
+      unsubListeners.push(onSnapshot(doc(db,"daily",`${uid}_${_dailyDate}`),
+        s=>{ wbCache.daily=s.exists()?s.data():{}; wbCache.dailyDate=_dailyDate; wbOnData(); },
         e=>{ console.error('[WB] daily listen',e); }));
       unsubListeners.push(onSnapshot(collection(db,"routines"),
         s=>{ wbCache.routines=[]; s.forEach(d=>wbCache.routines.push({id:d.id,...d.data()})); wbOnData(); },
@@ -489,7 +491,7 @@
     const set=(id,v)=>{ const e=$(id); if(e) e.textContent=v||''; };
     set('cnt-today',open);
     const routines=(wbCache.routines||[]).filter(r=>r.active!==false&&(r.targetUid==='all'||r.targetUid===uid)&&bizMatch(r)&&dayMatch(r,today()));
-    const rdone=new Set(((wbCache.daily&&wbCache.daily.routinesDone))||[]);
+    const rdone=new Set(((wbCache.dailyDate===today() && wbCache.daily && wbCache.daily.routinesDone))||[]);   // 자정 넘김 시 어제 완료기록으로 카운트 오염 방지(오늘 것 확인될 때만)
     set('cnt-fixed',routines.length?`${routines.filter(r=>rdone.has(r.id)).length}/${routines.length}`:'');
     const carryOpen=slots.filter(s=>(s.status||'todo')!=='done'&&s.title&&!carryExcluded(s,rtTitles)).length;   // 필수업무는 이월 안 되므로 '내일 계획' 수에서 제외
     const plan=(((wbCache.daily&&wbCache.daily.tomorrowTasks))||[]).filter(Boolean).length+carryOpen;
@@ -576,7 +578,7 @@
     _schedTimer=setInterval(()=>{
       if(today()!==_watchDay){ // 자정 넘어 날짜 바뀜 → 리스너·이월 재시작(어제 화면에 오늘 쓰기 방지)
         _watchDay=today();
-        if(currentUser){ try{ runCarryover(currentUser.uid, today()).catch(()=>{}); wbStartRealtime(wbUid||currentUser.uid); }catch(e){ console.error('[WB] rollover',e); } }
+        if(currentUser){ try{ runCarryover(currentUser.uid, today()).then(()=>reconcileRoutineDone(currentUser.uid, today())).catch(()=>{}); wbStartRealtime(wbUid||currentUser.uid); }catch(e){ console.error('[WB] rollover',e); } }
         return;
       }
       checkScheduleStart(); checkScheduleEnd();
@@ -1833,7 +1835,7 @@
     const routines=(wbCache.routines||[]).filter(r=>r.active!==false && r.time && (r.targetUid==='all'||r.targetUid===uid));
     if(!routines.length) return false;
     const skipped=new Set(((wbCache.daily&&wbCache.daily.routineSlotsSkipped)||[]));   // '다시 안 뜨게'는 오늘 daily 기준
-    const rdone=new Set(((wbCache.daily&&wbCache.daily.routinesDone)||[]));   // 오늘 체크리스트에서 완료 찍힌 필수업무 = 슬롯 완료상태의 진실원천(오늘만)
+    const rdone=new Set(((wbCache.dailyDate===today() && wbCache.daily && wbCache.daily.routinesDone)||[]));   // 오늘 체크리스트에서 완료 찍힌 필수업무 = 슬롯 완료상태의 진실원천(오늘만). ⚠ 캐시된 daily가 '오늘' 것으로 확인될 때만 신뢰 — 자정 넘김 시 어제 완료가 오늘로 새는 것 차단
     const src=(existing&&existing.length!=null)?existing:(wbCache.slots||[]);           // 완료상태 보존: 기존 slot 참조
     const tds=today();
     const ops=[];   // [key, id, data]
@@ -1868,6 +1870,26 @@
       }
     } finally { _rtEnsuring=false; }
     return true;
+  }
+  // ── 어제 완료가 오늘로 샌 필수업무 청소 ──
+  //   슬롯 '완료'가 그 날짜의 실제 완료기록(daily.routinesDone)에 없으면 미완료로 되돌린다.
+  //   그 날짜 것만·필수업무(fromRoutine)만·본인 접속 때만 손댐 → 어제 등 다른 날짜 데이터는 절대 안 건드림.
+  async function reconcileRoutineDone(uid, dateStr){
+    if(!currentUser || uid!==currentUser.uid) return;
+    try{
+      const [dSnap, sSnap]=await Promise.all([
+        getDoc(doc(db,"daily",`${uid}_${dateStr}`)),
+        getDocs(query(collection(db,"slots"),where("uid","==",uid),where("date","==",dateStr)))
+      ]);
+      const rdone=new Set(((dSnap.exists()?dSnap.data().routinesDone:[])||[]));
+      const fixes=[];
+      sSnap.forEach(d=>{ const s=d.data();
+        if(s.fromRoutine && (s.status||'todo')==='done' && !rdone.has(s.fromRoutine)){   // 오늘 실제로 완료 찍은 적 없는데 완료로 남은 필수업무 → 미완료로 정정
+          fixes.push(setDoc(doc(db,"slots",d.id),{status:'todo',updatedAt:Timestamp.now()},{merge:true}));
+        }
+      });
+      if(fixes.length) await Promise.all(fixes);
+    }catch(e){ console.error('[WB] reconcileRoutineDone',e); }
   }
   // 필수업무(자동 생성 업무)의 완료 상태를 체크리스트(daily.routinesDone)에 미러
   async function mirrorRoutineDone(routineId, uid, isDone){
